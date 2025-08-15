@@ -75,7 +75,7 @@ These rules are designed to **let winners run** but **cut losers/laggards** with
 - **MaxDD -10.5%**: Worst peak-to-trough drawdown; indicates risk of loss from equity highs.
 
 ### Equity Curve
-![Equity Curve](output/equity_curve_20250815_131846.png)
+![Equity Curve](https://github.com/oalotaik/saudi-swing-strategy/blob/main/assets/equity_curve_20250815_131846.png)
 
 > Backtests are not guarantees of future results. Slippage, fees, data errors, halts, and structural market shifts will impact live performance.
 
@@ -96,13 +96,15 @@ These rules are designed to **let winners run** but **cut losers/laggards** with
 ├── risk.py                  # Position sizing, weight caps, simple correlation utilities
 ├── config.py                # All thresholds & knobs (lookbacks, risks, limits, gates)
 ├── universe.txt             # One ticker per line (e.g., 1321.SR); comments start with '#'
-├── output/                  # Generated plots & CSVs (e.g., equity_curve_*.png, trades_*.csv)
-│   └── equity_curve_20250815_131846.png
-├── cache/
-│   ├── prices/              # 1-day price cache per ticker
-│   └── fundamentals/        # Fundamentals cache
+├── assets/                  # Git-tracked images for README (published plot lives here)
+│   └── equity_curve.png
+├── output/                  # Untracked artifacts (plots & CSVs generated locally)
+├── cache/                   # Cached data (prices, fundamentals, metadata)
+│   ├── prices/
+│   └── fundamentals/
 └── manual_fundamentals.csv  # Optional overrides (ticker, metric, value, period)
 ```
+
 
 ---
 
