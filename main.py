@@ -131,7 +131,7 @@ def build_parser():
     p.add_argument(
         "--bt-end",
         type=str,
-        default="2025-08-13",
+        default="2025-02-06",
         help="Portfolio backtest end date (YYYY-MM-DD).",
     )
     p.add_argument(

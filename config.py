@@ -57,8 +57,8 @@ CORRELATION_LOOKBACK = 60
 MAX_CORRELATION = 0.60
 
 # Selection
-MAX_CONCURRENT_POSITIONS = 3
-MAX_PER_SECTOR = 1  # max 1 position per sector
+MAX_CONCURRENT_POSITIONS = 5
+MAX_PER_SECTOR = 2  # max 1 position per sector
 
 # Ranking weights
 TECH_WEIGHT = 0.50
