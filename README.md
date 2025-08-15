@@ -2,7 +2,7 @@
 
 > **Note:** This repository is for **personal use**. I’m not seeking or accepting external contributions or issues.
 
-This project contains my end-to-end pipeline for **regime-aware swing/position trading** on the Saudi market. The focus is on **finding the strongest names during healthy market regimes**, entering on **breakouts or momentum-friendly pullbacks**, and **exiting quickly** when trend conditions deteriorate. The code is intentionally pragmatic rather than academic; the strategy description below is the main event, while the code is only here to make it run.
+This project contains my end-to-end pipeline for **regime-aware swing/position trading** on the Saudi market. The focus is on **finding the strongest names during healthy market regimes**, entering on **breakouts or momentum-friendly pullbacks**, and **exiting quickly** when trend conditions deteriorate. The code is intentionally pragmatic rather than academic.
 
 ---
 
