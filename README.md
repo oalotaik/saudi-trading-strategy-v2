@@ -99,7 +99,7 @@ These rules are designed to **let winners run** but **cut losers/laggards** with
 ├── assets/                  # Git-tracked images for README (published plot lives here)
 │   └── equity_curve.png
 ├── output/                  # Untracked artifacts (plots & CSVs generated locally)
-├── cache/                   # Cached data (prices, fundamentals, metadata)
+├── cache/                   # Untracked cached data (prices, fundamentals, metadata)
 │   ├── prices/
 │   └── fundamentals/
 └── manual_fundamentals.csv  # Optional overrides (ticker, metric, value, period)
@@ -126,11 +126,11 @@ These rules are designed to **let winners run** but **cut losers/laggards** with
 ### 2) Universe & Config
 - Put your tickers in `universe.txt`, one per line (e.g., `1321.SR`).  
 - Adjust thresholds in `config.py` (liquidity, regime, risk, etc.).  
-  - If your TASI index symbol differs on Yahoo, set `INDEX_TICKER` appropriately (e.g., `"^TASI"`).
+
 
 ### 3) Run a Diagnosis
 ```bash
-python main.py --universe universe.txt
+python diagnose.py
 ```
 
 ### 4) Portfolio Backtest
