@@ -1,18 +1,13 @@
 
-# Portfolio-level backtest (updated with new triggers, trend exits, CSV export hooks)
+# Portfolio-level backtest (robust to missing bars; regime-aware; DB55 entries; CSV/plot hooks live in main.py)
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
-import os
-
 import config
-from technicals import compute_indicators, trigger_DB55
-from screening import technical_screen
 from ranking import composite_rank, tech_score
-from risk import position_size, cap_weight, correlation_filter
-
+from risk import position_size, cap_weight
 
 @dataclass
 class Position:
@@ -26,7 +21,6 @@ class Position:
     bars_held: int = 0
     sector: str = ""
 
-
 @dataclass
 class Trade:
     date: pd.Timestamp
@@ -36,33 +30,43 @@ class Trade:
     shares: int
     reason: str = ""
 
-
 @dataclass
 class PortfolioResult:
     equity_curve: pd.Series
     trades: List[Trade] = field(default_factory=list)
     stats: Dict[str, float] = field(default_factory=dict)
 
-
 def _chandelier_trail(close_roll_max: float, atr: float, multiple: float = 3.0) -> float:
     return close_roll_max - multiple * atr
-
 
 def _perf_metrics(equity: pd.Series) -> Dict[str, float]:
     rets = equity.pct_change().dropna()
     if rets.empty:
-        return {}
+        return {"CAGR": 0.0, "Vol": 0.0, "Sharpe": 0.0, "MaxDD": 0.0}
     cagr = (equity.iloc[-1] / equity.iloc[0]) ** (252.0 / len(rets)) - 1
     vol = rets.std() * np.sqrt(252.0)
     sharpe = (rets.mean() / rets.std() * np.sqrt(252.0)) if rets.std() > 0 else 0.0
     dd = (equity / equity.cummax() - 1.0).min()
-    return {
-        "CAGR": float(cagr),
-        "Vol": float(vol),
-        "Sharpe": float(sharpe),
-        "MaxDD": float(dd),
-    }
+    return {"CAGR": float(cagr), "Vol": float(vol), "Sharpe": float(sharpe), "MaxDD": float(dd)}
 
+# --- Helpers to be robust to missing bars on a given dt ---
+def _row_on_or_before(df: pd.DataFrame, dt: pd.Timestamp) -> Optional[pd.Series]:
+    if df is None or df.empty:
+        return None
+    # fast path
+    try:
+        if dt in df.index:
+            return df.loc[dt]
+    except Exception:
+        pass
+    sub = df.loc[:dt]
+    if sub.empty:
+        return None
+    return sub.iloc[-1]
+
+def _close_on_or_before(df: pd.DataFrame, dt: pd.Timestamp) -> float:
+    row = _row_on_or_before(df, dt)
+    return float(row["Close"]) if row is not None and not pd.isna(row["Close"]) else np.nan
 
 def portfolio_backtest(
     price: Dict[str, pd.DataFrame],
@@ -74,15 +78,8 @@ def portfolio_backtest(
     init_equity: float = 300000.0,
     fund_filter_mode: str = "none",
 ):
-    """
-    Portfolio-level simulator with revised rules (RADICAL CHANGES):
-    - Regime gating (>=2 of 3) controls max names and risk per trade (half risk at 2/3).
-    - Entries: accept any of {D1 breakout, D2 pullback-and-go, DB55 Donchian breakout} + RS>=70 within sector.
-    - 2% risk per trade at regime=3; 1% risk at regime=2; 0 new entries at regime<2.
-    - Scale half at +2R; trail = Chandelier(20, 3*ATR). Hard trend exit: Close<EMA20 for 2 bars OR Close<EMA50 & ADX<15.
-    - Time stop at 60 bars.
-    - Drawdown controls (-20% flatten + cooldown).
-    """
+
+    # Build date range from index, clipped to [start,end]
     dates = index_ind.index
     if start:
         dates = dates[dates >= pd.to_datetime(start)]
@@ -103,7 +100,7 @@ def portfolio_backtest(
 
     idx_ret20 = index_ind["Close"].pct_change(20)
 
-    # Fundamentals static gating (optional; lookahead-prone)
+    # Fundamentals (static gating if requested)
     fs_static_pass = {t: True for t in price.keys()}
     if fund_filter_mode == "static":
         from fundamentals import compute_fundamental_metrics, sector_relative_scores
@@ -145,14 +142,17 @@ def portfolio_backtest(
         # Breadth at dt
         above50_flags = []
         for t, df in ind.items():
-            if dt in df.index:
-                row = df.loc[dt]
-                above50_flags.append(float(row["Close"] > row["SMA50"]))
+            row = _row_on_or_before(df, dt)
+            if row is None:
+                continue
+            above50_flags.append(float(row["Close"] > row.get("SMA50", np.nan)))
         breadth = 100.0 * (np.mean(above50_flags) if above50_flags else 0.0)
 
-        # Regime
-        row_idx = index_ind.loc[dt]
-        i = index_ind.index.get_loc(dt)
+        # Regime at dt
+        row_idx = _row_on_or_before(index_ind, dt)
+        if row_idx is None:
+            continue
+        i = index_ind.index.get_indexer([dt], method="pad")[0]  # nearest <= dt
         if i >= config.REGIME_SLOPE_WINDOW:
             slope = (
                 index_ind["SMA200"].iloc[i]
@@ -161,7 +161,7 @@ def portfolio_backtest(
         else:
             slope = 0.0
         cond1 = (row_idx["Close"] > row_idx["SMA200"]) and (slope > 0)
-        cond2 = row_idx["Close"] > row_idx["SMA50"]
+        cond2 = row_idx["Close"] > row_idx.get("SMA50", row_idx.get("EMA50", row_idx["Close"]))
         cond3 = breadth >= config.BREADTH_MIN_PCT_ABOVE_SMA50
         regime_true = sum([cond1, cond2, cond3])
 
@@ -182,9 +182,9 @@ def portfolio_backtest(
         to_close = []
         for t, pos in list(positions.items()):
             df = ind[t]
-            if dt not in df.index:
+            row = _row_on_or_before(df, dt)
+            if row is None:
                 continue
-            row = df.loc[dt]
             pos.bars_held += 1
             # scale at +2R once
             if (not pos.scaled) and (row["Close"] >= pos.entry + 2 * pos.r):
@@ -192,57 +192,48 @@ def portfolio_backtest(
                 if sell_sh > 0:
                     proceeds = sell_sh * row["Close"]
                     cash += proceeds
-                    trades.append(
-                        Trade(
-                            dt, t, "SELL", float(row["Close"]), int(sell_sh), "SCALE_2R"
-                        )
-                    )
+                    trades.append(Trade(dt, t, "SELL", float(row["Close"]), int(sell_sh), "SCALE_2R"))
                     pos.shares -= sell_sh
                     pos.scaled = True
-                    # move protective stop to breakeven for remainder
                     pos.stop = max(pos.stop, pos.entry)
             # update trail
-            idx_here = df.index.get_loc(dt)
+            idx_here = df.index.get_indexer([dt], method="pad")[0]
             high_close_20 = df["Close"].iloc[max(0, idx_here - 19) : idx_here + 1].max()
-            pos.trail = max(
-                pos.trail, _chandelier_trail(high_close_20, row["ATR14"], 3.0)
-            )
+            pos.trail = max(pos.trail, _chandelier_trail(high_close_20, row["ATR14"], 3.0))
             # exits
             exit_reason = None
-            # hard protective stop
+            # protective stop
             if row["Close"] <= pos.stop:
                 exit_reason = "STOP"
-            # trend exit: two closes below EMA20
-            elif idx_here >= 1 and (df["Close"].iloc[idx_here] < df["EMA20"].iloc[idx_here]) and (df["Close"].iloc[idx_here-1] < df["EMA20"].iloc[idx_here-1]):
-                exit_reason = "EMA20xDOWN"
-            # weakening / loss of momentum
-            elif (row["Close"] < row["EMA50"]) and (row["ADX14"] < 15.0):
-                exit_reason = "WEAK"
-            # trailing stop
-            elif row["Close"] < pos.trail:
-                exit_reason = "TRAIL"
-            # time stop
-            elif pos.bars_held >= 60:
-                exit_reason = "TIME"
+            else:
+                # trend exit: two closes below EMA20
+                idx_prev = max(0, idx_here - 1)
+                if (
+                    df["Close"].iloc[idx_here] < df["EMA20"].iloc[idx_here]
+                    and df["Close"].iloc[idx_prev] < df["EMA20"].iloc[idx_prev]
+                ):
+                    exit_reason = "EMA20xDOWN"
+                elif (row["Close"] < row["EMA50"]) and (row["ADX14"] < 15.0):
+                    exit_reason = "WEAK"
+                elif row["Close"] < pos.trail:
+                    exit_reason = "TRAIL"
+                elif pos.bars_held >= 60:
+                    exit_reason = "TIME"
 
             if exit_reason:
                 proceeds = pos.shares * row["Close"]
                 cash += proceeds
-                trades.append(
-                    Trade(
-                        dt, t, "SELL", float(row["Close"]), int(pos.shares), exit_reason
-                    )
-                )
+                trades.append(Trade(dt, t, "SELL", float(row["Close"]), int(pos.shares), exit_reason))
                 to_close.append(t)
         for t in to_close:
             positions.pop(t, None)
 
-        # Equity and drawdown
-        mkt_value = sum(
-            ind[t].loc[dt]["Close"] * pos.shares
-            for t, pos in positions.items()
-            if dt in ind[t].index
-        )
+        # Equity and drawdown using as-of close (pad last value)
+        mkt_value = 0.0
+        for t, pos in positions.items():
+            close = _close_on_or_before(ind[t], dt)
+            if not np.isnan(close):
+                mkt_value += close * pos.shares
         equity = cash + mkt_value
         peak_equity = max(peak_equity, equity)
         dd = (equity / peak_equity) - 1.0
@@ -250,11 +241,11 @@ def portfolio_backtest(
         # Drawdown controls
         if dd <= -config.PORTFOLIO_MAX_DRAWDOWN and len(positions) > 0:
             for t, pos in list(positions.items()):
-                price_close = ind[t].loc[dt]["Close"]
-                cash += pos.shares * price_close
-                trades.append(
-                    Trade(dt, t, "SELL", float(price_close), int(pos.shares), "MAX_DD")
-                )
+                price_close = _close_on_or_before(ind[t], dt)
+                if np.isnan(price_close):
+                    continue
+                cash += pos.shares * float(price_close)
+                trades.append(Trade(dt, t, "SELL", float(price_close), int(pos.shares), "MAX_DD"))
                 positions.pop(t, None)
             cooldown = config.DRAWDOWN_COOLDOWN_DAYS
 
@@ -270,7 +261,7 @@ def portfolio_backtest(
             risk_frac = config.RISK_PER_TRADE
         elif regime_true == 2 and cooldown == 0:
             max_names_today = max(1, config.MAX_CONCURRENT_POSITIONS - 1)
-            risk_frac = max(0.5 * config.RISK_PER_TRADE, 0.005)  # half risk
+            risk_frac = max(0.5 * config.RISK_PER_TRADE, 0.005)
         else:
             max_names_today = 0
             risk_frac = 0.0
@@ -280,15 +271,14 @@ def portfolio_backtest(
             # RS percentile within sector at dt
             rs_pct = {}
             for sec in unique_sectors:
-                members = [
-                    t
-                    for t, s in sectors.items()
-                    if s == sec and dt in ind.get(t, pd.DataFrame()).index
-                ]
+                members = [t for t, s in sectors.items() if s == sec and t in ind]
                 vals = {}
                 for t in members:
-                    r = ind[t]["Close"].pct_change(20).loc[dt]
-                    vals[t] = r if not np.isnan(r) else np.nan
+                    series = ind[t]["Close"].pct_change(20)
+                    if dt in series.index:
+                        vals[t] = series.loc[dt]
+                    else:
+                        vals[t] = series.loc[:dt].iloc[-1] if not series.loc[:dt].empty else np.nan
                 ser = pd.Series(vals).dropna()
                 if not ser.empty:
                     ranks = ser.rank(pct=True) * 100.0
@@ -300,19 +290,25 @@ def portfolio_backtest(
             from technicals import technical_posture, trigger_D1, trigger_D2, trigger_DB55
 
             for t, df in ind.items():
-                if t in positions or dt not in df.index:
+                if t in positions:
+                    continue
+                # require at least some history before dt
+                if _row_on_or_before(df, dt) is None:
                     continue
                 if fund_filter_mode == "static" and not fs_static_pass.get(t, False):
                     continue
                 sec = sectors.get(t, "Unknown")
-                if sector_rs_pct.get(sec, 0.0) < config.SECTOR_TOP_PERCENTILE:
+                # sector RS gate
+                sec_strength = sector_rs_pct.get(sec, 50.0)
+                if sec_strength < config.SECTOR_TOP_PERCENTILE:
                     continue
-                last = df.loc[dt]
-                vvalue_avg20 = df["VValue"].rolling(config.VOLUME_AVG).mean().loc[dt]
-                vol_avg20 = df["Volume"].rolling(config.VOLUME_AVG).mean().loc[dt]
+                last = _row_on_or_before(df, dt)
+                volavg20 = last.get("VolAvg20", np.nan)
+                vvalue_avg20 = (last["Close"] * volavg20) if not pd.isna(volavg20) else np.nan
+                # liquidity screens
                 if not (
-                    vvalue_avg20 >= config.MIN_AVG_DAILY_VALUE_SAR
-                    and vol_avg20 >= config.MIN_AVG_DAILY_VOLUME
+                    (not pd.isna(vvalue_avg20) and vvalue_avg20 >= config.MIN_AVG_DAILY_VALUE_SAR)
+                    and (not pd.isna(volavg20) and volavg20 >= config.MIN_AVG_DAILY_VOLUME)
                     and last["Close"] >= config.MIN_PRICE_SAR
                 ):
                     continue
@@ -322,7 +318,7 @@ def portfolio_backtest(
                     continue
                 d1 = trigger_D1(sub)
                 d2 = trigger_D2(sub)
-                db = trigger_DB55(sub)  # NEW radical breakout
+                db = trigger_DB55(sub)
                 if not (d1 or d2 or db):
                     continue
                 # RS>=70 within sector gate
@@ -330,51 +326,39 @@ def portfolio_backtest(
                     continue
                 tech = tech_score(sub, rs_pct.get(t, 50.0))
                 fund = 70.0
-                sect_score = sector_rs_pct.get(sec, 50.0)
+                sect_score = sec_strength
                 comp = composite_rank(tech, fund, sect_score)
                 trig = "D1" if d1 else ("D2" if d2 else "DB55")
                 candidates.append((t, comp, trig, sec))
 
             # Correlation & sector caps; greedily add
             from collections import defaultdict
-
             by_sec = defaultdict(int)
             add_needed = max_names_today - len(positions)
             selected = []
             held = list(positions.keys())
-            for t, comp, trig, sec in sorted(
-                candidates, key=lambda x: x[1], reverse=True
-            ):
+
+            for t, comp, trig, sec in sorted(candidates, key=lambda x: x[1], reverse=True):
                 if by_sec[sec] >= config.MAX_PER_SECTOR:
                     continue
-                # Correlation check vs current holdings
+                # Correlation filter vs current holdings (as-of dt)
                 ok_corr = True
                 if held:
-                    corr_df = pd.DataFrame(
-                        {
-                            ht: ind[ht]["Close"]
-                            .pct_change()
-                            .loc[:dt]
-                            .iloc[-config.CORRELATION_LOOKBACK :]
-                            for ht in held
-                            if dt in ind[ht].index
-                        }
-                    )
-                    corr_df[t] = (
-                        ind[t]["Close"]
-                        .pct_change()
-                        .loc[:dt]
-                        .iloc[-config.CORRELATION_LOOKBACK :]
-                    )
-                    corr = corr_df.corr()
+                    corr_df = pd.DataFrame()
                     for ht in held:
-                        if ht in corr.index and t in corr.columns:
-                            if (
-                                pd.notna(corr.loc[ht, t])
-                                and corr.loc[ht, t] > config.MAX_CORRELATION
-                            ):
-                                ok_corr = False
-                                break
+                        s = ind[ht]["Close"].pct_change().loc[:dt].tail(config.CORRELATION_LOOKBACK)
+                        if not s.empty:
+                            corr_df[ht] = s.reset_index(drop=True)
+                    s_new = ind[t]["Close"].pct_change().loc[:dt].tail(config.CORRELATION_LOOKBACK)
+                    if not s_new.empty:
+                        corr_df[t] = s_new.reset_index(drop=True)
+                    if not corr_df.empty and t in corr_df.columns:
+                        corr = corr_df.corr()
+                        for ht in held:
+                            if ht in corr.index and t in corr.columns:
+                                if pd.notna(corr.loc[ht, t]) and corr.loc[ht, t] > config.MAX_CORRELATION:
+                                    ok_corr = False
+                                    break
                 if not ok_corr:
                     continue
                 selected.append((t, comp, trig, sec))
@@ -382,50 +366,35 @@ def portfolio_backtest(
                 if len(selected) >= add_needed:
                     break
 
-            # Execute entries at close
+            # Execute entries at as-of close
             for t, comp, trig, sec in selected:
-                row = ind[t].loc[dt]
+                row = _row_on_or_before(ind[t], dt)
+                if row is None:
+                    continue
                 entry_price = float(row["Close"])
                 swing_low = ind[t]["Low"].loc[:dt].rolling(10).min().iloc[-1]
-                init_stop = max(
-                    entry_price - 2 * row["ATR14"], swing_low - 0.5 * row["ATR14"]
-                )
+                init_stop = max(entry_price - 2 * row["ATR14"], swing_low - 0.5 * row["ATR14"])
                 per_share_risk = max(entry_price - init_stop, 0.0)
                 if per_share_risk <= 0:
                     continue
-                # dynamic risk
                 shares = int((risk_frac * equity) // per_share_risk)
                 shares = cap_weight(shares, entry_price, equity)
-                if shares <= 0:
+                if shares <= 0 or (shares * entry_price) > cash:
                     continue
-                cost = shares * entry_price
-                if cost > cash:
-                    continue
-                cash -= cost
+                cash -= shares * entry_price
                 r = entry_price - init_stop
-                high_close_20 = ind[t]["Close"].loc[:dt].iloc[-20:].max()
+                high_close_20 = ind[t]["Close"].loc[:dt].tail(20).max()
                 trail = _chandelier_trail(high_close_20, row["ATR14"], 3.0)
-                positions[t] = Position(
-                    t,
-                    entry_price,
-                    int(shares),
-                    float(init_stop),
-                    float(trail),
-                    float(r),
-                    scaled=False,
-                    bars_held=0,
-                    sector=sec,
-                )
-                trades.append(
-                    Trade(dt, t, "BUY", float(entry_price), int(shares), f"ENTRY_{trig}")
-                )
+                positions[t] = Position(t, entry_price, int(shares), float(init_stop), float(trail), float(r),
+                                        scaled=False, bars_held=0, sector=sec)
+                trades.append(Trade(dt, t, "BUY", float(entry_price), int(shares), f"ENTRY_{trig}"))
 
-        # Record equity
-        mkt_value = sum(
-            ind[t].loc[dt]["Close"] * pos.shares
-            for t, pos in positions.items()
-            if dt in ind[t].index
-        )
+        # Record equity at end of dt
+        mkt_value = 0.0
+        for t, pos in positions.items():
+            close = _close_on_or_before(ind[t], dt)
+            if not np.isnan(close):
+                mkt_value += close * pos.shares
         equity = cash + mkt_value
         equity_curve.append((dt, equity))
 

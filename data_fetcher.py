@@ -126,7 +126,7 @@ def _load_cached_prices(ticker: str) -> Optional[pd.DataFrame]:
         try:
             df = pd.read_csv(path)
             if not df.empty and "Date" in df.columns:
-                df["Date"] = pd.to_datetime(df["Date"])
+                df["Date"] = pd.to_datetime(df["Date"], utc=False).dt.tz_localize(None)
                 df.set_index("Date", inplace=True)
             return df
         except Exception:
@@ -148,7 +148,8 @@ def get_price_history(ticker: str, lookback_days: int = 400, refresh: bool = Fal
         cached = _load_cached_prices(ticker)
         if cached is not None and not cached.empty:
             # Trim to lookback
-            lb_start = pd.Timestamp.utcnow().normalize() - pd.Timedelta(days=int(lookback_days * 1.5))
+            lb_start = pd.Timestamp.today().normalize() - pd.Timedelta(days=int(lookback_days * 1.5))
+            cached.index = pd.DatetimeIndex(cached.index).tz_localize(None)
             cached = cached[cached.index >= lb_start]
             return cached
 
@@ -164,7 +165,7 @@ def get_price_history(ticker: str, lookback_days: int = 400, refresh: bool = Fal
 
     df = df[['Open','High','Low','Close','Adj Close','Volume']].copy()
     df.dropna(subset=['Close','Volume'], inplace=True)
-    df.index = pd.to_datetime(df.index)
+    df.index = pd.to_datetime(df.index, utc=False).tz_localize(None)
     _save_cached_prices(ticker, df)
     return df
 

@@ -1,4 +1,3 @@
-
 # main.py — updated with price caching CLI, company names, color-coding, plotting & CSV export
 import argparse
 import os
@@ -16,7 +15,15 @@ from fundamentals import compute_fundamental_metrics, sector_relative_scores
 from ranking import tech_score, composite_rank
 from risk import position_size, cap_weight
 
-from reporting import print_panel, print_table, info, warn, error, colorize_status, fmt_ticker_and_name
+from reporting import (
+    print_panel,
+    print_table,
+    info,
+    warn,
+    error,
+    colorize_status,
+    fmt_ticker_and_name,
+)
 
 # Progress UI (disabled with --no-progress)
 from rich.progress import (
@@ -118,13 +125,13 @@ def build_parser():
     p.add_argument(
         "--bt-start",
         type=str,
-        default=None,
+        default="2022-01-01",
         help="Portfolio backtest start date (YYYY-MM-DD).",
     )
     p.add_argument(
         "--bt-end",
         type=str,
-        default=None,
+        default="2025-08-13",
         help="Portfolio backtest end date (YYYY-MM-DD).",
     )
     p.add_argument(
@@ -182,7 +189,9 @@ def main(args):
         t_prices = progress.add_task("Prices & indicators", total=len(universe))
         for t in universe:
             try:
-                p = dfetch.get_price_history(t, lookback_days=500, refresh=args.refresh_prices)
+                p = dfetch.get_price_history(
+                    t, lookback_days=1500, refresh=args.refresh_prices
+                )
                 if p.empty:
                     warn(f"No price data for {t}. Skipping.")
                     progress.advance(t_prices)
@@ -205,7 +214,7 @@ def main(args):
     info(f"Fetching index ({config.INDEX_TICKER}) and computing market regime...")
     with _make_progress(disabled=args.no_progress) as progress:
         t_reg = progress.add_task("Market regime", total=1)
-        idx = dfetch.get_index_history(lookback_days=500, refresh=args.refresh_prices)
+        idx = dfetch.get_index_history(lookback_days=1500, refresh=args.refresh_prices)
         if idx.empty:
             error("Index data not available; cannot compute regime.")
             return
@@ -354,7 +363,9 @@ def main(args):
         tr = tech_res.get(t, {})
         up = "PASS" if bool(tr.get("PostureUptrend", False)) else "FAIL"
         fs_val = fs_map.get(t, 0.0)
-        fs_ok = "PASS" if fs_val >= getattr(config, "FUNDAMENTAL_MIN_FS", 60.0) else "FAIL"
+        fs_ok = (
+            "PASS" if fs_val >= getattr(config, "FUNDAMENTAL_MIN_FS", 60.0) else "FAIL"
+        )
         overview.append(
             [
                 fmt_ticker_and_name(t, names.get(t)),
