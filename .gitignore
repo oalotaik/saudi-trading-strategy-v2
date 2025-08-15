@@ -101,6 +101,8 @@ output/
 # === Runtime dirs created by this project ===
 cache/
 cache/**
+output/
+output/**
 
 # === Python bytecode caches ===
 __pycache__/

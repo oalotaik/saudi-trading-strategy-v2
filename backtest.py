@@ -1,11 +1,14 @@
-# Portfolio-level backtest (updated code)
+
+# Portfolio-level backtest (updated with new triggers, trend exits, CSV export hooks)
 from typing import Dict, List, Tuple, Optional
 from dataclasses import dataclass, field
 import numpy as np
 import pandas as pd
 
+import os
+
 import config
-from technicals import compute_indicators
+from technicals import compute_indicators, trigger_DB55
 from screening import technical_screen
 from ranking import composite_rank, tech_score
 from risk import position_size, cap_weight, correlation_filter
@@ -72,13 +75,13 @@ def portfolio_backtest(
     fund_filter_mode: str = "none",
 ):
     """
-    Portfolio-level simulator with rules:
-    - Regime gating (need >=2 of 3 true for new entries).
-    - D1/D2 triggers for entries; ranking and selection (2-3 names).
-    - 2%% risk per trade, 40%% cap, correlation and sector caps.
-    - Scale half at +2R; trail = Chandelier(20, 4*ATR); time stop at 60 bars.
-    - Drawdown controls (-10%% tighten, -15%% flatten + cooldown).
-    - Optional fundamentals gating: 'none' or 'static' (FS computed upfront).
+    Portfolio-level simulator with revised rules (RADICAL CHANGES):
+    - Regime gating (>=2 of 3) controls max names and risk per trade (half risk at 2/3).
+    - Entries: accept any of {D1 breakout, D2 pullback-and-go, DB55 Donchian breakout} + RS>=70 within sector.
+    - 2% risk per trade at regime=3; 1% risk at regime=2; 0 new entries at regime<2.
+    - Scale half at +2R; trail = Chandelier(20, 3*ATR). Hard trend exit: Close<EMA20 for 2 bars OR Close<EMA50 & ADX<15.
+    - Time stop at 60 bars.
+    - Drawdown controls (-20% flatten + cooldown).
     """
     dates = index_ind.index
     if start:
@@ -115,7 +118,7 @@ def portfolio_backtest(
             except Exception:
                 fund_raw[t] = {"metrics": {}, "improvements": {}, "FS": None}
         fs_map = sector_relative_scores(fund_raw, sectors)
-        # Sector FS percentile for top-40%% rule
+        # Sector FS percentile for top-40% rule
         sec_groups = {}
         for t, sec in sectors.items():
             sec_groups.setdefault(sec, []).append((t, fs_map.get(t, 0.0)))
@@ -196,9 +199,9 @@ def portfolio_backtest(
                     )
                     pos.shares -= sell_sh
                     pos.scaled = True
-                                # move protective stop to breakeven for remainder
+                    # move protective stop to breakeven for remainder
                     pos.stop = max(pos.stop, pos.entry)
-# update trail
+            # update trail
             idx_here = df.index.get_loc(dt)
             high_close_20 = df["Close"].iloc[max(0, idx_here - 19) : idx_here + 1].max()
             pos.trail = max(
@@ -206,13 +209,22 @@ def portfolio_backtest(
             )
             # exits
             exit_reason = None
-            # initial STOP enforcement
+            # hard protective stop
             if row["Close"] <= pos.stop:
                 exit_reason = "STOP"
+            # trend exit: two closes below EMA20
+            elif idx_here >= 1 and (df["Close"].iloc[idx_here] < df["EMA20"].iloc[idx_here]) and (df["Close"].iloc[idx_here-1] < df["EMA20"].iloc[idx_here-1]):
+                exit_reason = "EMA20xDOWN"
+            # weakening / loss of momentum
+            elif (row["Close"] < row["EMA50"]) and (row["ADX14"] < 15.0):
+                exit_reason = "WEAK"
+            # trailing stop
             elif row["Close"] < pos.trail:
                 exit_reason = "TRAIL"
+            # time stop
             elif pos.bars_held >= 60:
                 exit_reason = "TIME"
+
             if exit_reason:
                 proceeds = pos.shares * row["Close"]
                 cash += proceeds
@@ -250,14 +262,18 @@ def portfolio_backtest(
         if cooldown > 0:
             cooldown -= 1
 
-        # New entries capacity today
+        # New entries capacity today + dynamic risk
+        risk_frac = 0.0
         max_names_today = 0
-        if regime_true >= 2 and cooldown == 0:
-            max_names_today = (
-                config.MAX_CONCURRENT_POSITIONS
-                if regime_true == 3
-                else max(1, config.MAX_CONCURRENT_POSITIONS - 1)
-            )
+        if regime_true == 3 and cooldown == 0:
+            max_names_today = config.MAX_CONCURRENT_POSITIONS
+            risk_frac = config.RISK_PER_TRADE
+        elif regime_true == 2 and cooldown == 0:
+            max_names_today = max(1, config.MAX_CONCURRENT_POSITIONS - 1)
+            risk_frac = max(0.5 * config.RISK_PER_TRADE, 0.005)  # half risk
+        else:
+            max_names_today = 0
+            risk_frac = 0.0
 
         # Select and enter new positions if capacity
         if max_names_today > len(positions):
@@ -281,12 +297,10 @@ def portfolio_backtest(
 
             # Build candidates
             candidates = []
-            from technicals import technical_posture, trigger_D1, trigger_D2
+            from technicals import technical_posture, trigger_D1, trigger_D2, trigger_DB55
 
             for t, df in ind.items():
-                if t in positions:
-                    continue
-                if dt not in df.index:
+                if t in positions or dt not in df.index:
                     continue
                 if fund_filter_mode == "static" and not fs_static_pass.get(t, False):
                     continue
@@ -308,7 +322,8 @@ def portfolio_backtest(
                     continue
                 d1 = trigger_D1(sub)
                 d2 = trigger_D2(sub)
-                if not (d1 or d2):
+                db = trigger_DB55(sub)  # NEW radical breakout
+                if not (d1 or d2 or db):
                     continue
                 # RS>=70 within sector gate
                 if rs_pct.get(t, 50.0) < 70.0:
@@ -317,7 +332,8 @@ def portfolio_backtest(
                 fund = 70.0
                 sect_score = sector_rs_pct.get(sec, 50.0)
                 comp = composite_rank(tech, fund, sect_score)
-                candidates.append((t, comp, d1, d2, sec))
+                trig = "D1" if d1 else ("D2" if d2 else "DB55")
+                candidates.append((t, comp, trig, sec))
 
             # Correlation & sector caps; greedily add
             from collections import defaultdict
@@ -326,7 +342,7 @@ def portfolio_backtest(
             add_needed = max_names_today - len(positions)
             selected = []
             held = list(positions.keys())
-            for t, comp, d1, d2, sec in sorted(
+            for t, comp, trig, sec in sorted(
                 candidates, key=lambda x: x[1], reverse=True
             ):
                 if by_sec[sec] >= config.MAX_PER_SECTOR:
@@ -361,20 +377,24 @@ def portfolio_backtest(
                                 break
                 if not ok_corr:
                     continue
-                selected.append((t, comp, d1, d2, sec))
+                selected.append((t, comp, trig, sec))
                 by_sec[sec] += 1
                 if len(selected) >= add_needed:
                     break
 
             # Execute entries at close
-            for t, comp, d1, d2, sec in selected:
+            for t, comp, trig, sec in selected:
                 row = ind[t].loc[dt]
                 entry_price = float(row["Close"])
                 swing_low = ind[t]["Low"].loc[:dt].rolling(10).min().iloc[-1]
                 init_stop = max(
                     entry_price - 2 * row["ATR14"], swing_low - 0.5 * row["ATR14"]
                 )
-                shares = position_size(equity, entry_price, init_stop)
+                per_share_risk = max(entry_price - init_stop, 0.0)
+                if per_share_risk <= 0:
+                    continue
+                # dynamic risk
+                shares = int((risk_frac * equity) // per_share_risk)
                 shares = cap_weight(shares, entry_price, equity)
                 if shares <= 0:
                     continue
@@ -397,7 +417,7 @@ def portfolio_backtest(
                     sector=sec,
                 )
                 trades.append(
-                    Trade(dt, t, "BUY", float(entry_price), int(shares), "ENTRY")
+                    Trade(dt, t, "BUY", float(entry_price), int(shares), f"ENTRY_{trig}")
                 )
 
         # Record equity

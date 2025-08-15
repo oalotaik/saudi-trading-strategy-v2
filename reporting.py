@@ -1,4 +1,5 @@
-from typing import Dict, List, Any
+
+from typing import Dict, List, Any, Optional
 from rich.console import Console
 from rich.table import Table
 from rich.panel import Panel
@@ -25,3 +26,17 @@ def warn(msg: str):
 
 def error(msg: str):
     console.print(f"[bold red]ERROR[/]: {msg}")
+
+# Helpers to colorize PASS/FAIL/NEAR
+def colorize_status(val: str) -> str:
+    v = (val or "").upper()
+    if "PASS" in v:
+        return f"[bold green]{val}[/]"
+    if "NEAR" in v:
+        return f"[bold yellow]{val}[/]"
+    if "FAIL" in v:
+        return f"[bold red]{val}[/]"
+    return val
+
+def fmt_ticker_and_name(ticker: str, name: Optional[str]) -> str:
+    return f"{ticker} — {name}" if name else ticker

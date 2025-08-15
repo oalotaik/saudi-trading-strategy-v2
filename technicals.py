@@ -1,3 +1,4 @@
+
 from typing import Dict, Tuple, Optional
 import numpy as np
 import pandas as pd
@@ -59,6 +60,7 @@ def compute_indicators(df: pd.DataFrame) -> pd.DataFrame:
     out["VValueAvg20"] = out["VValue"].rolling(config.VOLUME_AVG).mean()
     out["High20"] = out["High"].rolling(20).max()
     out["Low20"] = out["Low"].rolling(20).min()
+    out["High55"] = out["High"].rolling(55).max()  # for Donchian breakout
     return out
 
 def technical_posture(out: pd.DataFrame) -> Dict[str, bool]:
@@ -99,3 +101,26 @@ def trigger_D2(out: pd.DataFrame) -> bool:
     if last["Close"] > prev["High"] and last["RSI14"] >= 50.0:
         return True
     return False
+
+# NEW: Donchian breakout trigger (radical entry option)
+def trigger_DB55(out: pd.DataFrame) -> bool:
+    """
+    Donchian breakout using window = config.DONCHIAN_LOOKBACK (default 55).
+    Additional gates: ADX >= config.DB55_MIN_ADX (default 18), volume >= config.DB55_VOL_MULT * VolAvg20 (default 1.2),
+    and Close > SMA200.
+    """
+    window = getattr(config, "DONCHIAN_LOOKBACK", 55)
+    if len(out) < window + 5:
+        return False
+    last = out.iloc[-1]
+    highN = out["High"].rolling(window).max().iloc[-1]
+    vol_avg20 = last["VolAvg20"] if not np.isnan(last["VolAvg20"]) else 0.0
+    min_adx = getattr(config, "DB55_MIN_ADX", 18.0)
+    vol_mult = getattr(config, "DB55_VOL_MULT", 1.2)
+    conds = [
+        last["Close"] >= highN,
+        last["ADX14"] >= float(min_adx),
+        last["Volume"] >= float(vol_mult) * vol_avg20,
+        last["Close"] > last["SMA200"],
+    ]
+    return all(conds)

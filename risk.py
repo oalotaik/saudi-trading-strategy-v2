@@ -1,3 +1,4 @@
+
 from typing import Dict, List, Tuple
 import numpy as np
 import pandas as pd
@@ -5,6 +6,7 @@ import pandas as pd
 import config
 
 def position_size(equity: float, entry: float, stop: float) -> int:
+    """Default 2% risk sizing based on config.RISK_PER_TRADE."""
     risk_per_trade = config.RISK_PER_TRADE * equity
     per_share_risk = max(entry - stop, 0.0)
     if per_share_risk <= 0:
@@ -20,6 +22,7 @@ def cap_weight(shares: int, entry: float, equity: float) -> int:
     return int(cap // entry)
 
 def correlation_filter(price_hist: Dict[str, pd.Series]) -> Dict[Tuple[str,str], float]:
+    """Utility kept for completeness; detects pairs exceeding MAX_CORRELATION."""
     df = pd.DataFrame({t: s for t, s in price_hist.items()}).pct_change()
     corr = df.corr()
     pairs = {}

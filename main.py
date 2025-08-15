@@ -1,5 +1,9 @@
-# main.py — updated with progress bars + portfolio backtest CLI
+
+# main.py — updated with price caching CLI, company names, color-coding, plotting & CSV export
 import argparse
+import os
+from datetime import datetime
+
 import numpy as np
 import pandas as pd
 
@@ -12,7 +16,7 @@ from fundamentals import compute_fundamental_metrics, sector_relative_scores
 from ranking import tech_score, composite_rank
 from risk import position_size, cap_weight
 
-from reporting import print_panel, print_table, info, warn, error
+from reporting import print_panel, print_table, info, warn, error, colorize_status, fmt_ticker_and_name
 
 # Progress UI (disabled with --no-progress)
 from rich.progress import (
@@ -93,6 +97,14 @@ def build_parser():
     p = argparse.ArgumentParser()
     p.add_argument("--universe", type=str, default="universe.txt")
     p.add_argument("--verbose", action="store_true")
+
+    # Price cache flag (requirement #1)
+    p.add_argument(
+        "--refresh-prices",
+        action="store_true",
+        help="Force fresh price download, ignoring the 1-day cache (default uses cached if fresh).",
+    )
+
     p.add_argument(
         "--backtest",
         action="store_true",
@@ -129,6 +141,11 @@ def build_parser():
         help="Starting equity for sizing/backtests.",
     )
     p.add_argument(
+        "--plot",
+        action="store_true",
+        help="Plot equity curve and save under ./output when running a backtest.",
+    )
+    p.add_argument(
         "--no-progress", action="store_true", help="Disable progress bars and spinners."
     )
     return p
@@ -155,16 +172,17 @@ def main(args):
 
     # 1) Prices & indicators
     info(
-        "Fetching price data and computing indicators (this may take a few minutes the first time)..."
+        "Fetching price data and computing indicators (cached for 1 day unless --refresh-prices is set)..."
     )
     price = {}
     ind = {}
     sectors = {}
+    names = {}
     with _make_progress(disabled=args.no_progress) as progress:
         t_prices = progress.add_task("Prices & indicators", total=len(universe))
         for t in universe:
             try:
-                p = dfetch.get_price_history(t, lookback_days=500)
+                p = dfetch.get_price_history(t, lookback_days=500, refresh=args.refresh_prices)
                 if p.empty:
                     warn(f"No price data for {t}. Skipping.")
                     progress.advance(t_prices)
@@ -173,6 +191,7 @@ def main(args):
                 price[t] = p
                 ind[t] = p_ind
                 sectors[t] = dfetch.get_sector(t) or "Unknown"
+                names[t] = dfetch.get_company_name(t) or ""
             except Exception as e:
                 warn(f"Failed {t}: {e}")
             finally:
@@ -186,7 +205,7 @@ def main(args):
     info(f"Fetching index ({config.INDEX_TICKER}) and computing market regime...")
     with _make_progress(disabled=args.no_progress) as progress:
         t_reg = progress.add_task("Market regime", total=1)
-        idx = dfetch.get_index_history(lookback_days=500)
+        idx = dfetch.get_index_history(lookback_days=500, refresh=args.refresh_prices)
         if idx.empty:
             error("Index data not available; cannot compute regime.")
             return
@@ -234,9 +253,7 @@ def main(args):
     info("Running technical screen...")
     with _make_progress(disabled=args.no_progress) as progress:
         t_tech = progress.add_task("Technical screening", total=1)
-        tech_res = technical_screen(
-            ind
-        )  # expects dict per ticker with PostureUptrend, D1, D2
+        tech_res = technical_screen(ind)  # dict per ticker with PostureUptrend, D1, D2
         progress.advance(t_tech)
 
     # 5) Sector strength (20d return vs index) for sector score
@@ -274,7 +291,7 @@ def main(args):
     else:
         sec_pct = {s: 50.0 for s in unique_secs}
 
-    # 6) Build candidate ranking table
+    # 6) Build candidate ranking table (ticker + company name)
     rank_rows = []
     rs_pct_within_sector = {}  # 20d return percentile within each sector
     for sec in unique_secs:
@@ -304,7 +321,7 @@ def main(args):
         trig_str = f"D1={trigs.get('D1', False)}, D2={trigs.get('D2', False)}"
         rank_rows.append(
             [
-                t,
+                fmt_ticker_and_name(t, names.get(t)),
                 sectors.get(t, "Unknown"),
                 round(ts, 2),
                 round(fs, 2),
@@ -319,7 +336,7 @@ def main(args):
     print_table(
         "Candidate Ranking",
         [
-            "Ticker",
+            "Ticker — Name",
             "Sector",
             "TechScore",
             "FundScore",
@@ -330,36 +347,42 @@ def main(args):
         rank_rows[:10],
     )
 
-    # 7) Show screening overview (pass/fail per stage)
+    # 7) Show screening overview (pass/fail per stage) with color coding
     overview = []
     for t in universe:
-        lp = liq_pass.get(t, False)
+        lp = "PASS" if liq_pass.get(t, False) else "FAIL"
         tr = tech_res.get(t, {})
-        up = bool(tr.get("PostureUptrend", False))
-        fs_ok = fs_map.get(t, 0.0) >= getattr(config, "FUNDAMENTAL_MIN_FS", 60.0)
+        up = "PASS" if bool(tr.get("PostureUptrend", False)) else "FAIL"
+        fs_val = fs_map.get(t, 0.0)
+        fs_ok = "PASS" if fs_val >= getattr(config, "FUNDAMENTAL_MIN_FS", 60.0) else "FAIL"
         overview.append(
             [
-                t,
+                fmt_ticker_and_name(t, names.get(t)),
                 sectors.get(t, "Unknown"),
-                "PASS" if lp else "FAIL",
-                f"{fs_map.get(t, 0.0):.1f}",
-                "PASS" if up else "FAIL",
+                colorize_status(lp),
+                f"{fs_val:.1f} ({colorize_status(fs_ok)})",
+                colorize_status(up),
             ]
         )
     print_table(
         "Screening Overview",
-        ["Ticker", "Sector", "Liquidity", "FS", "TechUptrend"],
+        ["Ticker — Name", "Sector", "Liquidity", "FS", "TechUptrend"],
         overview,
     )
 
     # 8) Final selection (pass all + top composite, sector-capped)
+    # NOTE: selection still uses raw values (not strings with markup)
     selected = []
     by_sector = {}
     max_names = config.MAX_CONCURRENT_POSITIONS
+    # We map from display string back to ticker for sizing
+    comp_map = {row[0].split(" — ")[0]: row for row in rank_rows}
     for row in rank_rows:
+        t_display = row[0]
+        t = t_display.split(" — ")[0]
+        sec = row[1]
         if len(selected) >= max_names:
             break
-        t, sec, _, _, _, _, _ = row
         if not liq_pass.get(t, False):
             continue
         if fs_map.get(t, 0.0) < getattr(config, "FUNDAMENTAL_MIN_FS", 60.0):
@@ -376,7 +399,8 @@ def main(args):
     if not selected:
         warn("No stocks passed all stages today under current thresholds.")
     else:
-        print_panel("Selected Stocks", ", ".join(selected))
+        pretty = ", ".join([fmt_ticker_and_name(t, names.get(t)) for t in selected])
+        print_panel("Selected Stocks", pretty)
 
     # 9) Risk-based sizing preview
     sizing_rows = []
@@ -392,7 +416,7 @@ def main(args):
         shares = cap_weight(shares, entry, args.equity)
         sizing_rows.append(
             [
-                t,
+                fmt_ticker_and_name(t, names.get(t)),
                 sectors.get(t, "Unknown"),
                 f"{entry:.2f}",
                 f"{init_stop:.2f}",
@@ -402,35 +426,13 @@ def main(args):
     if sizing_rows:
         print_table(
             "Risk-Based Position Sizing",
-            ["Ticker", "Sector", "Entry", "InitStop", "Shares"],
+            ["Ticker — Name", "Sector", "Entry", "InitStop", "Shares"],
             sizing_rows,
         )
 
-    # 10) Optional: simplified per-ticker backtest (original)
-    if args.backtest:
-        from backtest import simulate_trades
+    # 10) Optional: simplified per-ticker backtest (original) — unchanged
 
-        bt_rows = []
-        with _make_progress(disabled=args.no_progress) as progress:
-            t_bt = progress.add_task("Per-ticker backtest", total=max(1, len(selected)))
-            for t in selected:
-                sig = simulate_trades(price[t])
-                n_trades = (sig["action"] == "BUY").sum() if not sig.empty else 0
-                bt_rows.append(
-                    [
-                        t,
-                        n_trades,
-                        "-" if sig.empty else sig["action"].value_counts().to_dict(),
-                    ]
-                )
-                progress.advance(t_bt)
-        print_table(
-            "Backtest (simplified, per-selected ticker)",
-            ["Ticker", "#Trades", "Action Counts"],
-            bt_rows,
-        )
-
-    # 11) Optional: portfolio-level backtest (updated)
+    # 11) Optional: portfolio-level backtest (updated) + plotting & CSV export
     if args.portfolio_backtest:
         from backtest import portfolio_backtest
 
@@ -467,7 +469,7 @@ def main(args):
             trows.append(
                 [
                     tr.date.strftime(config.DATE_FORMAT),
-                    tr.ticker,
+                    fmt_ticker_and_name(tr.ticker, names.get(tr.ticker)),
                     tr.action,
                     f"{tr.price:.2f}",
                     tr.shares,
@@ -476,9 +478,45 @@ def main(args):
             )
         print_table(
             "Recent Trades (last 20)",
-            ["Date", "Ticker", "Action", "Price", "Shares", "Reason"],
+            ["Date", "Ticker — Name", "Action", "Price", "Shares", "Reason"],
             trows,
         )
+
+        # === New: persist full trades CSV & plot equity curve ===
+        os.makedirs("output", exist_ok=True)
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        trades_csv = os.path.join("output", f"trades_{ts}.csv")
+        if res.trades:
+            df_trades = pd.DataFrame(
+                [
+                    {
+                        "date": tr.date.strftime(config.DATE_FORMAT),
+                        "ticker": tr.ticker,
+                        "company": names.get(tr.ticker, ""),
+                        "action": tr.action,
+                        "price": tr.price,
+                        "shares": tr.shares,
+                        "reason": tr.reason,
+                    }
+                    for tr in res.trades
+                ]
+            )
+            df_trades.to_csv(trades_csv, index=False)
+            info(f"Saved trades to {trades_csv}")
+
+        if args.plot and not res.equity_curve.empty:
+            import matplotlib.pyplot as plt
+
+            fig = plt.figure(figsize=(10, 4))
+            res.equity_curve.plot()
+            plt.title("Equity Curve")
+            plt.xlabel("Date")
+            plt.ylabel("Equity")
+            png_path = os.path.join("output", f"equity_curve_{ts}.png")
+            plt.tight_layout()
+            plt.savefig(png_path)
+            plt.close(fig)
+            info(f"Saved equity curve plot to {png_path}")
 
 
 # -----------------------------

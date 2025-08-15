@@ -77,13 +77,12 @@ MANUAL_FUNDAMENTALS_CSV = (
 BACKTEST_START = None  # e.g., "2022-01-01"
 BACKTEST_END = None
 
-# === Portfolio backtest (updated code) ===
-# Max portfolio drawdown before flattening all positions
-PORTFOLIO_MAX_DRAWDOWN = 0.20  # 20% max drawdown
 
 # Cooldown days after a max-DD flatten event (no new entries)
 DRAWDOWN_COOLDOWN_DAYS = 7
 
-# If any of the following are missing in your config, add them too:
-CORRELATION_LOOKBACK = 60  # days for pairwise corr filter vs current holdings
-MAX_CORRELATION = 0.60  # skip new entry if corr > this with any holding
+
+# --- Donchian breakout (DB55) ---
+DONCHIAN_LOOKBACK = 55
+DB55_MIN_ADX = 18.0
+DB55_VOL_MULT = 1.2

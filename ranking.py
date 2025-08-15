@@ -1,3 +1,4 @@
+
 from typing import Dict, Tuple
 import numpy as np
 import pandas as pd
@@ -12,7 +13,9 @@ def tech_score(ind: pd.DataFrame, sector_rel_series_value: float) -> float:
     adx_pct = (adx_clip - 15.0) / (35.0 - 15.0) * 100.0
     prox = abs((last["Close"] - last["EMA20"]) / (last["ATR14"] if last["ATR14"]>0 else 1.0))
     prox = max(0.0, 1.0 - min(prox, 1.0)) * 100.0
-    return float(np.mean([rs_pct, rs_pct, adx_pct, prox]))
+    # Slightly weight RS more (twice) than prox/ADX for momentum tilt
+    return float(np.average([rs_pct, rs_pct, adx_pct, prox], weights=[0.35,0.35,0.15,0.15]))
 
 def composite_rank(tech: float, fund: float, sect: float) -> float:
+    # Keep config weights but this function is minimal and needed
     return round(config.TECH_WEIGHT * tech + config.FUND_WEIGHT * fund + config.SECTOR_WEIGHT * sect, 2)

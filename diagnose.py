@@ -1,3 +1,4 @@
+
 import argparse
 import pandas as pd
 import numpy as np
@@ -7,7 +8,7 @@ import data_fetcher as dfetch
 from technicals import compute_indicators
 from screening import liquidity_screen, technical_screen
 from fundamentals import compute_fundamental_metrics, sector_relative_scores
-from reporting import print_panel, print_table, info, warn, error
+from reporting import print_panel, print_table, info, warn, error, colorize_status, fmt_ticker_and_name
 
 # NEW: rich progress imports
 from rich.progress import (
@@ -42,20 +43,22 @@ def diagnose(args):
         return
 
     # 1) Prices & indicators
-    info("Fetching prices & indicators...")
+    info("Fetching prices & indicators (using 1-day cache unless --refresh-prices)...")
     ind = {}
     sectors = {}
+    names = {}
     with _make_progress(disabled=args.no_progress) as progress:
         t_prices = progress.add_task("Prices & indicators", total=len(tickers))
         for t in tickers:
             try:
-                p = dfetch.get_price_history(t, lookback_days=500)
+                p = dfetch.get_price_history(t, lookback_days=500, refresh=args.refresh_prices)
                 if p.empty:
                     warn(f"No price for {t}")
                     progress.advance(t_prices)
                     continue
                 ind[t] = compute_indicators(p)
                 sectors[t] = dfetch.get_sector(t) or "Unknown"
+                names[t] = dfetch.get_company_name(t) or ""
             except Exception as e:
                 warn(f"{t}: {e}")
             finally:
@@ -103,7 +106,7 @@ def diagnose(args):
                     fs_pct[t] = float(ranks.loc[t])
             progress.advance(t_fs)
 
-    # 4) Technical & Liquidity screen (no heavy loops inside; just run, then assemble table rows with a bar)
+    # 4) Technical & Liquidity screen
     info("Running technical & liquidity screens...")
     with _make_progress(disabled=args.no_progress) as progress:
         t_screens = progress.add_task("Screens", total=3)
@@ -114,14 +117,12 @@ def diagnose(args):
         # assemble rows
         rows = []
         near_miss_pct = args.near_miss_pct
-        # Build table rows (progress over tickers)
         t_rows = progress.add_task("Build report", total=len(tickers))
         for t in tickers:
             fs = fs_map.get(t, 0.0)
             fs_pass = fs >= config.FUNDAMENTAL_MIN_FS
-            fs_near = (
-                fs >= config.FUNDAMENTAL_MIN_FS * (1 - near_miss_pct / 100.0)
-            ) and not fs_pass
+            fs_near = (fs >= config.FUNDAMENTAL_MIN_FS * (1 - near_miss_pct / 100.0)) and not fs_pass
+            fs_status = "PASS" if fs_pass else ("NEAR" if fs_near else "FAIL")
 
             tech_post = tech.get(t, {}).get("PostureUptrend", False)
             tech_near = False
@@ -132,14 +133,15 @@ def diagnose(args):
                     and abs(last["Close"] / last["EMA50"] - 1.0) <= 0.01
                 ):
                     tech_near = True
+            tech_status = "PASS" if tech_post else ("NEAR" if tech_near else "FAIL")
 
             rows.append(
                 [
-                    t,
+                    fmt_ticker_and_name(t, names.get(t)),
                     sectors.get(t, "Unknown"),
-                    "PASS" if liq.get(t, False) else "FAIL",
-                    f"{fs:.1f} ({'PASS' if fs_pass else 'NEAR' if fs_near else 'FAIL'})",
-                    "PASS" if tech_post else ("NEAR" if tech_near else "FAIL"),
+                    colorize_status("PASS" if liq.get(t, False) else "FAIL"),
+                    f"{fs:.1f} ({colorize_status(fs_status)})",
+                    colorize_status(tech_status),
                     f"D1={tech.get(t, {}).get('D1', False)}, D2={tech.get(t, {}).get('D2', False)}",
                     f"FS pct in sector: {fs_pct.get(t, 0.0):.1f}%",
                 ]
@@ -149,7 +151,7 @@ def diagnose(args):
     print_table(
         "Diagnosis: Cross-Analysis of Screening Phases",
         [
-            "Ticker",
+            "Ticker — Name",
             "Sector",
             "Liquidity",
             "Fundamentals",
@@ -177,8 +179,8 @@ if __name__ == "__main__":
         help="Threshold for near-miss classification in % below the pass threshold.",
     )
     # NEW: toggle progress bars
-    ap.add_argument(
-        "--no-progress", action="store_true", help="Disable progress bars and spinners."
-    )
+    ap.add_argument("--no-progress", action="store_true", help="Disable progress bars and spinners.")
+    # NEW: price refresh flag
+    ap.add_argument("--refresh-prices", action="store_true", help="Force fresh price download (ignore 1-day cache).")
     args = ap.parse_args()
     diagnose(args)
