@@ -71,7 +71,7 @@ These rules are designed to **let winners run** but **cut losers/laggards** with
 **Brief interpretation**  
 - **CAGR 7.67%**: Annualized growth rate of the equity curve over the backtest. This **outpaced TASI (~3.14%)** in the same window.  
 - **Vol 10.44%**: Annualized volatility; reflects the swing in returns. Lower is generally smoother.  
-- **Sharpe 0.76**: Return per unit of volatility (≈ excess return normalized by risk). Values around **0.7–1.0** are considered acceptable for active strategies.  
+- **Sharpe 0.76**: Return per unit of volatility (≈ excess return normalized by risk).  
 - **MaxDD -10.5%**: Worst peak-to-trough drawdown; indicates risk of loss from equity highs.
 
 ### Equity Curve
