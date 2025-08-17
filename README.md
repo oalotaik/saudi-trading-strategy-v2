@@ -82,6 +82,7 @@ From `universe.txt`. Minimum **20d value traded**, **20d volume**, and **min pri
 | **MaxDD** | **-0.1046** | **-0.2781** |
 
 **Notes**: The improvement (vs older settings) comes from allowing **1 slot at a 1/3 regime**, which increases participation while keeping risk controls intact. Flat equity near the end of the window is expected when the regime score drops to **0/3** (no new entries).
+![Backtest results](https://github.com/oalotaik/saudi-swing-strategy/blob/main/assets/equity_curve_with_bench_20250817_142346.png)
 
 ---
 
