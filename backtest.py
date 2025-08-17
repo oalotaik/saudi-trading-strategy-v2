@@ -35,6 +35,9 @@ class PortfolioResult:
     equity_curve: pd.Series
     trades: List[Trade] = field(default_factory=list)
     stats: Dict[str, float] = field(default_factory=dict)
+    bench_equity: Optional[pd.Series] = None
+    bench_stats: Optional[Dict[str, float]] = None
+    open_positions: List[Position] = field(default_factory=list)
 
 def _chandelier_trail(close_roll_max: float, atr: float, multiple: float = 3.0) -> float:
     return close_roll_max - multiple * atr
@@ -262,6 +265,9 @@ def portfolio_backtest(
         elif regime_true == 2 and cooldown == 0:
             max_names_today = max(1, config.MAX_CONCURRENT_POSITIONS - 1)
             risk_frac = max(0.5 * config.RISK_PER_TRADE, 0.005)
+        elif regime_true == 1 and cooldown == 0:
+            max_names_today = 1
+            risk_frac = max(0.5 * config.RISK_PER_TRADE, 0.005)
         else:
             max_names_today = 0
             risk_frac = 0.0
@@ -397,7 +403,20 @@ def portfolio_backtest(
                 mkt_value += close * pos.shares
         equity = cash + mkt_value
         equity_curve.append((dt, equity))
-
     equity_series = pd.Series({d: v for d, v in equity_curve}).sort_index()
     stats = _perf_metrics(equity_series)
-    return PortfolioResult(equity_series, trades, stats)
+
+    # Benchmark (^TASI.SR) buy&hold aligned to equity dates
+    idx_close = index_ind["Close"].reindex(equity_series.index).ffill()
+    bench_rets = idx_close.pct_change().fillna(0.0)
+    bench_equity = (1.0 + bench_rets).cumprod() * float(init_equity)
+    bench_stats = _perf_metrics(bench_equity)
+
+    return PortfolioResult(
+        equity_curve=equity_series,
+        trades=trades,
+        stats=stats,
+        bench_equity=bench_equity,
+        bench_stats=bench_stats,
+        open_positions=list(positions.values()),
+    )

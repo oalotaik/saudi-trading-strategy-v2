@@ -25,6 +25,7 @@ os.makedirs(PRICE_CACHE_DIR, exist_ok=True)
 PRICE_CACHE_DAYS = 1  # requirement: cache price data for 1 day by default
 
 
+
 def _safe_yf_download(ticker: str, start: Optional[str] = None, end: Optional[str] = None,
                       max_retries: int = 3, sleep_sec: float = 1.0) -> pd.DataFrame:
     last_exc = None
@@ -34,11 +35,21 @@ def _safe_yf_download(ticker: str, start: Optional[str] = None, end: Optional[st
                 ticker, start=start, end=end, auto_adjust=False,
                 progress=False, interval="1d", group_by="ticker", threads=False
             )
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                if isinstance(df.columns, pd.MultiIndex):
-                    df = df.droplevel(0, axis=1)
-                return df.rename(columns=str.title)
+            # If empty (e.g., non-trading days Fri/Sat for KSA), treat as "no new bars"
+            if not isinstance(df, pd.DataFrame) or df.empty:
+                return pd.DataFrame()
+            if isinstance(df.columns, pd.MultiIndex):
+                df = df.droplevel(0, axis=1)
+            df = df.rename(columns=str.title)
+            cols = ["Open","High","Low","Close","Adj Close","Volume"]
+            keep = [c for c in cols if c in df.columns]
+            df = df[keep].copy()
+            df.index = pd.to_datetime(df.index, utc=False).tz_localize(None)
+            return df
         except Exception as e:
+            # Tolerate yfinance weekend spans: "no price data found"
+            if "no price data found" in str(e).lower():
+                return pd.DataFrame()
             last_exc = e
         time.sleep(sleep_sec * attempt)
     if last_exc:

@@ -1,20 +1,18 @@
-# main.py — updated with price caching CLI, company names, color-coding, plotting & CSV export
 import argparse
 import os
 from datetime import datetime
-
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+from matplotlib.ticker import FuncFormatter
 
 import config
 import data_fetcher as dfetch
-
 from technicals import compute_indicators, technical_posture, trigger_D1, trigger_D2
 from screening import liquidity_screen, technical_screen
 from fundamentals import compute_fundamental_metrics, sector_relative_scores
 from ranking import tech_score, composite_rank
 from risk import position_size, cap_weight
-
 from reporting import (
     print_panel,
     print_table,
@@ -25,7 +23,12 @@ from reporting import (
     fmt_ticker_and_name,
 )
 
-# Progress UI (disabled with --no-progress)
+try:
+    from portfolio import load_state, summarize_state
+except Exception:
+    load_state = None
+    summarize_state = None
+
 from rich.progress import (
     Progress,
     SpinnerColumn,
@@ -37,9 +40,6 @@ from rich.progress import (
 )
 
 
-# -----------------------------
-# Progress factory
-# -----------------------------
 def _make_progress(disabled: bool = False):
     return Progress(
         SpinnerColumn(),
@@ -53,11 +53,7 @@ def _make_progress(disabled: bool = False):
     )
 
 
-# -----------------------------
-# Simple helpers for regime/breadth
-# -----------------------------
 def compute_breadth(ind: dict) -> float:
-    """% of universe with Close > EMA50 (latest bar)."""
     flags = []
     for t, df in ind.items():
         if df.empty:
@@ -69,18 +65,11 @@ def compute_breadth(ind: dict) -> float:
 
 
 def market_regime(idx_ind: pd.DataFrame, breadth_pct: float) -> dict:
-    """
-    3-condition regime:
-      1) Index Close > SMA200 and SMA200 slope up (lookback REGIME_SLOPE_WINDOW)
-      2) Index Close > EMA50
-      3) Universe breadth >= BREADTH_MIN_PCT_ABOVE_SMA50
-    """
     if idx_ind is None or idx_ind.empty:
         return {"Cond1": False, "Cond2": False, "Cond3": False, "Score": 0}
     i = len(idx_ind) - 1
     if i < 0:
         return {"Cond1": False, "Cond2": False, "Cond3": False, "Score": 0}
-
     last = idx_ind.iloc[i]
     if i >= config.REGIME_SLOPE_WINDOW:
         slope = (
@@ -89,7 +78,6 @@ def market_regime(idx_ind: pd.DataFrame, breadth_pct: float) -> dict:
         )
     else:
         slope = 0.0
-
     cond1 = (last["Close"] > last["SMA200"]) and (slope > 0)
     cond2 = last["Close"] > last["EMA50"]
     cond3 = breadth_pct >= config.BREADTH_MIN_PCT_ABOVE_SMA50
@@ -97,30 +85,19 @@ def market_regime(idx_ind: pd.DataFrame, breadth_pct: float) -> dict:
     return {"Cond1": cond1, "Cond2": cond2, "Cond3": cond3, "Score": score}
 
 
-# -----------------------------
-# CLI
-# -----------------------------
 def build_parser():
     p = argparse.ArgumentParser()
     p.add_argument("--universe", type=str, default="universe.txt")
     p.add_argument("--verbose", action="store_true")
-
-    # Price cache flag (requirement #1)
     p.add_argument(
         "--refresh-prices",
         action="store_true",
-        help="Force fresh price download, ignoring the 1-day cache (default uses cached if fresh).",
-    )
-
-    p.add_argument(
-        "--backtest",
-        action="store_true",
-        help="Run simplified per-ticker backtest (original).",
+        help="Force fresh price download (otherwise incrementally appended).",
     )
     p.add_argument(
         "--portfolio-backtest",
         action="store_true",
-        help="Run portfolio-level backtest (updated).",
+        help="Run portfolio-level backtest.",
     )
     p.add_argument(
         "--bt-start",
@@ -131,7 +108,7 @@ def build_parser():
     p.add_argument(
         "--bt-end",
         type=str,
-        default="2025-02-06",
+        default=datetime.today().strftime("%Y-%m-%d"),
         help="Portfolio backtest end date (YYYY-MM-DD).",
     )
     p.add_argument(
@@ -139,7 +116,7 @@ def build_parser():
         type=str,
         default="static",
         choices=["none", "static"],
-        help="Fundamentals gating in portfolio backtest: none (no fundamentals) or static (use current FS; look-ahead).",
+        help="Fundamentals gating in portfolio backtest.",
     )
     p.add_argument(
         "--equity",
@@ -150,7 +127,7 @@ def build_parser():
     p.add_argument(
         "--plot",
         action="store_true",
-        help="Plot equity curve and save under ./output when running a backtest.",
+        help="Plot equity curve(s) and save under ./output when running a backtest.",
     )
     p.add_argument(
         "--no-progress", action="store_true", help="Disable progress bars and spinners."
@@ -158,33 +135,22 @@ def build_parser():
     return p
 
 
-# -----------------------------
-# Universe
-# -----------------------------
 def load_universe(path: str) -> list:
     return dfetch.load_universe(path)
 
 
-# -----------------------------
-# Main pipeline
-# -----------------------------
 def main(args):
     if args.verbose:
         info(f"Universe file: {args.universe}")
-
     universe = load_universe(args.universe)
     if not universe:
         error("Universe is empty or file not found.")
         return
 
-    # 1) Prices & indicators
     info(
-        "Fetching price data and computing indicators (cached for 1 day unless --refresh-prices is set)..."
+        "Fetching price data and computing indicators (incremental; use --refresh-prices to force full refresh)..."
     )
-    price = {}
-    ind = {}
-    sectors = {}
-    names = {}
+    price, ind, sectors, names = {}, {}, {}, {}
     with _make_progress(disabled=args.no_progress) as progress:
         t_prices = progress.add_task("Prices & indicators", total=len(universe))
         for t in universe:
@@ -210,7 +176,6 @@ def main(args):
         error("No price/indicator data; cannot proceed.")
         return
 
-    # 2) Index & regime
     info(f"Fetching index ({config.INDEX_TICKER}) and computing market regime...")
     with _make_progress(disabled=args.no_progress) as progress:
         t_reg = progress.add_task("Market regime", total=1)
@@ -223,7 +188,6 @@ def main(args):
         regime = market_regime(idx_ind, breadth)
         progress.advance(t_reg)
 
-    # Regime panel
     r_txt = (
         f"Cond1 (Idx>SMA200 & SMA200↑): {'✔' if regime['Cond1'] else '✖'}\n"
         f"Cond2 (Idx>EMA50): {'✔' if regime['Cond2'] else '✖'}\n"
@@ -232,7 +196,7 @@ def main(args):
     )
     print_panel("Market Regime", r_txt)
 
-    # 3) Fundamentals (cached; FS computed later by sector_relative_scores)
+    # fundamentals
     info("Computing/caching fundamentals & FS...")
     try:
         manual_df = pd.read_csv(config.MANUAL_FUNDAMENTALS_CSV)
@@ -252,26 +216,18 @@ def main(args):
             finally:
                 progress.advance(t_fund)
 
-    # Sector-relative FS (0..100)
     fs_map = sector_relative_scores(fund_data, sectors)
 
-    # 4) Liquidity & technical screens
     info("Running liquidity screen...")
     liq_pass = liquidity_screen(ind)
-
     info("Running technical screen...")
-    with _make_progress(disabled=args.no_progress) as progress:
-        t_tech = progress.add_task("Technical screening", total=1)
-        tech_res = technical_screen(ind)  # dict per ticker with PostureUptrend, D1, D2
-        progress.advance(t_tech)
+    tech_res = technical_screen(ind)
 
-    # 5) Sector strength (20d return vs index) for sector score
     info("Computing sector strength (20d RS vs index) ...")
     sec_returns = {}
     unique_secs = list(set(sectors.values()))
     with _make_progress(disabled=args.no_progress) as progress:
         t_sec = progress.add_task("Sector strength", total=len(unique_secs))
-        # Precompute 20d index return
         idx_ret20 = (
             idx_ind["Close"].pct_change(20).iloc[-1] if len(idx_ind) >= 21 else np.nan
         )
@@ -292,25 +248,24 @@ def main(args):
                         np.nanmean(rlist) - (idx_ret20 if pd.notna(idx_ret20) else 0.0)
                     )
             progress.advance(t_sec)
+    sec_pct = (
+        (pd.Series(sec_returns).rank(pct=True) * 100.0).to_dict()
+        if sec_returns
+        else {s: 50.0 for s in unique_secs}
+    )
 
-    # Convert sector RS to percentiles (higher is better)
-    if sec_returns:
-        ser_sec = pd.Series(sec_returns)
-        sec_pct = (ser_sec.rank(pct=True) * 100.0).to_dict()
-    else:
-        sec_pct = {s: 50.0 for s in unique_secs}
-
-    # 6) Build candidate ranking table (ticker + company name)
+    # rank table
     rank_rows = []
-    rs_pct_within_sector = {}  # 20d return percentile within each sector
+    rs_pct_within_sector = {}
     for sec in unique_secs:
         members = [
             t for t, s in sectors.items() if s == sec and t in ind and len(ind[t]) >= 25
         ]
         if not members:
             continue
-        ser = pd.Series({t: ind[t]["Close"].pct_change(20).iloc[-1] for t in members})
-        ser = ser.dropna()
+        ser = pd.Series(
+            {t: ind[t]["Close"].pct_change(20).iloc[-1] for t in members}
+        ).dropna()
         if ser.empty:
             continue
         ranks = ser.rank(pct=True) * 100.0
@@ -321,7 +276,6 @@ def main(args):
         if t not in ind or ind[t].empty:
             continue
         df = ind[t]
-        # Tech score uses recent window + RS within sector
         ts = tech_score(df, rs_pct_within_sector.get(t, 50.0))
         fs = fs_map.get(t, 0.0)
         sscore = sec_pct.get(sectors.get(t, "Unknown"), 50.0)
@@ -339,8 +293,6 @@ def main(args):
                 trig_str,
             ]
         )
-
-    # Sort by composite desc
     rank_rows.sort(key=lambda r: r[5], reverse=True)
     print_table(
         "Candidate Ranking",
@@ -356,7 +308,7 @@ def main(args):
         rank_rows[:10],
     )
 
-    # 7) Show screening overview (pass/fail per stage) with color coding
+    # overview
     overview = []
     for t in universe:
         lp = "PASS" if liq_pass.get(t, False) else "FAIL"
@@ -381,13 +333,9 @@ def main(args):
         overview,
     )
 
-    # 8) Final selection (pass all + top composite, sector-capped)
-    # NOTE: selection still uses raw values (not strings with markup)
-    selected = []
-    by_sector = {}
+    # selection (unchanged)
+    selected, by_sector = [], {}
     max_names = config.MAX_CONCURRENT_POSITIONS
-    # We map from display string back to ticker for sizing
-    comp_map = {row[0].split(" — ")[0]: row for row in rank_rows}
     for row in rank_rows:
         t_display = row[0]
         t = t_display.split(" — ")[0]
@@ -400,31 +348,40 @@ def main(args):
             continue
         if not tech_res.get(t, {}).get("PostureUptrend", False):
             continue
-        if sec not in by_sector:
-            by_sector[sec] = 0
-        if by_sector[sec] >= config.MAX_PER_SECTOR:
+        if by_sector.get(sec, 0) >= config.MAX_PER_SECTOR:
             continue
         selected.append(t)
-        by_sector[sec] += 1
-
-    if not selected:
-        warn("No stocks passed all stages today under current thresholds.")
-    else:
+        by_sector[sec] = by_sector.get(sec, 0) + 1
+    if selected:
         pretty = ", ".join([fmt_ticker_and_name(t, names.get(t)) for t in selected])
         print_panel("Selected Stocks", pretty)
+    else:
+        warn("No stocks passed all stages today under current thresholds.")
 
-    # 9) Risk-based sizing preview
+    # sizing preview based on portfolio state (if exists)
     sizing_rows = []
+    equity_for_sizing = args.equity
+    if load_state is not None and os.path.exists(
+        os.path.join("cache", "portfolio_state.json")
+    ):
+        try:
+            st = load_state(default_cash=args.equity)
+            equity_for_sizing = st.cash + sum(
+                (ind[t].iloc[-1]["Close"] * st.positions[t].shares)
+                for t in st.positions
+                if t in ind
+            )
+        except Exception:
+            pass
     for t in selected:
         df = ind[t]
         last = df.iloc[-1]
         entry = float(last["Close"])
         atr = float(last["ATR14"])
-        # swing low stop heuristic: min low over last 10 bars
         swing_low = float(df["Low"].iloc[-10:].min())
         init_stop = max(entry - 2 * atr, swing_low - 0.5 * atr)
-        shares = position_size(args.equity, entry, init_stop)
-        shares = cap_weight(shares, entry, args.equity)
+        shares = position_size(equity_for_sizing, entry, init_stop)
+        shares = cap_weight(shares, entry, equity_for_sizing)
         sizing_rows.append(
             [
                 fmt_ticker_and_name(t, names.get(t)),
@@ -436,14 +393,12 @@ def main(args):
         )
     if sizing_rows:
         print_table(
-            "Risk-Based Position Sizing",
+            "Preview: What-If Position Sizing (not an order list)",
             ["Ticker — Name", "Sector", "Entry", "InitStop", "Shares"],
             sizing_rows,
         )
 
-    # 10) Optional: simplified per-ticker backtest (original) — unchanged
-
-    # 11) Optional: portfolio-level backtest (updated) + plotting & CSV export
+    # portfolio backtest + plot
     if args.portfolio_backtest:
         from backtest import portfolio_backtest
 
@@ -451,25 +406,32 @@ def main(args):
         with _make_progress(disabled=args.no_progress) as progress:
             t_pbt = progress.add_task("Portfolio simulation", total=1)
             res = portfolio_backtest(
-                price,
-                ind,
-                sectors,
-                idx_ind,
-                args.bt_start,
-                args.bt_end,
+                price=price,
+                ind=ind,
+                sectors=sectors,
+                index_ind=idx_ind,
+                start=args.bt_start,
+                end=args.bt_end,
                 init_equity=args.equity,
                 fund_filter_mode=args.bt_fundamentals,
             )
             progress.advance(t_pbt)
 
-        rows = [
-            [k, f"{v:.4f}" if isinstance(v, float) else v] for k, v in res.stats.items()
-        ]
-        print_table("Portfolio Stats", ["Metric", "Value"], rows)
+        # Always print the side-by-side stat table
+        rows = []
+        for m in ["CAGR", "Vol", "Sharpe", "MaxDD"]:
+            pval = res.stats.get(m, np.nan)
+            bval = (res.bench_stats or {}).get(m, np.nan)
+            rows.append([m, f"{pval:.4f}", f"{bval:.4f}"])
+        print_table(
+            "Portfolio Stats (vs Benchmark)",
+            ["Metric", "Portfolio", "Benchmark (^TASI.SR)"],
+            rows,
+        )
 
         # Last 10 equity points
         ec_rows = [
-            [d.strftime(config.DATE_FORMAT), f"{res.equity_curve.loc[d]:.0f}"]
+            [d.strftime(config.DATE_FORMAT), f"{res.equity_curve.loc[d]:,.0f}"]
             for d in res.equity_curve.index[-10:]
         ]
         print_table("Equity Curve (last 10)", ["Date", "Equity"], ec_rows)
@@ -492,45 +454,99 @@ def main(args):
             ["Date", "Ticker — Name", "Action", "Price", "Shares", "Reason"],
             trows,
         )
-
-        # === New: persist full trades CSV & plot equity curve ===
-        os.makedirs("output", exist_ok=True)
-        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-        trades_csv = os.path.join("output", f"trades_{ts}.csv")
-        if res.trades:
-            df_trades = pd.DataFrame(
-                [
-                    {
-                        "date": tr.date.strftime(config.DATE_FORMAT),
-                        "ticker": tr.ticker,
-                        "company": names.get(tr.ticker, ""),
-                        "action": tr.action,
-                        "price": tr.price,
-                        "shares": tr.shares,
-                        "reason": tr.reason,
-                    }
-                    for tr in res.trades
-                ]
+        # Snapshot of active positions at end (always show a section)
+        snap = []
+        for p in res.open_positions or []:
+            try:
+                last_px = ind[p.ticker].iloc[-1]["Close"]
+            except Exception:
+                last_px = float("nan")
+            snap.append([
+                fmt_ticker_and_name(p.ticker, names.get(p.ticker)),
+                p.sector,
+                f"{p.entry:.2f}",
+                f"{p.stop:.2f}",
+                f"{last_px:.2f}",
+                int(p.shares),
+            ])
+        if snap:
+            print_table(
+                "Active Positions at End of Backtest",
+                ["Ticker — Name", "Sector", "Entry", "Stop", "Last", "Shares"],
+                snap,
             )
-            df_trades.to_csv(trades_csv, index=False)
-            info(f"Saved trades to {trades_csv}")
+        else:
+            print_panel("Active Positions at End of Backtest", "None (all positions closed by end date)")
 
-        if args.plot and not res.equity_curve.empty:
-            import matplotlib.pyplot as plt
+        if args.plot:
+            os.makedirs("output", exist_ok=True)
+            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+            fig, ax1 = plt.subplots(figsize=(11, 6))
+            ax1.plot(res.equity_curve.index, res.equity_curve.values, label="Portfolio")
+            if res.bench_equity is not None:
+                ax1.plot(
+                    res.bench_equity.index,
+                    res.bench_equity.values,
+                    label=f"Benchmark ({config.INDEX_TICKER})",
+                    alpha=0.8,
+                )
+            ax1.set_title("Equity Curve (Portfolio vs Benchmark)")
+            ax1.set_xlabel("Date")
+            ax1.set_ylabel("Equity (SAR)")
+            ax1.yaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{x:,.0f}"))
+            ax1.legend(loc="upper left")
+            ax1.grid(True, alpha=0.25)
 
-            fig = plt.figure(figsize=(10, 4))
-            res.equity_curve.plot()
-            plt.title("Equity Curve")
-            plt.xlabel("Date")
-            plt.ylabel("Equity")
-            png_path = os.path.join("output", f"equity_curve_{ts}.png")
-            plt.tight_layout()
-            plt.savefig(png_path)
+            # Right axis: % from start
+            ax2 = ax1.twinx()
+            pct = res.equity_curve / float(res.equity_curve.iloc[0]) - 1.0
+            ax2.plot(res.equity_curve.index, pct.values, alpha=0)  # register axis only
+            ax2.set_ylabel("% from start")
+            ax2.yaxis.set_major_formatter(FuncFormatter(lambda x, p: f"{x * 100:.0f}%"))
+
+            # Drawdown annotation
+            dd = res.equity_curve / res.equity_curve.cummax() - 1.0
+            if not dd.empty:
+                dd_min = float(dd.min())
+                dd_end = dd.idxmin()
+                ax1.annotate(
+                    f"Max DD: {dd_min:.1%}\n@ {dd_end.strftime('%Y-%m-%d')}",
+                    xy=(dd_end, res.equity_curve.loc[dd_end]),
+                    xytext=(0.02, 0.15),
+                    textcoords="axes fraction",
+                    arrowprops=dict(arrowstyle="->"),
+                )
+
+            png_path = os.path.join("output", f"equity_curve_with_bench_{ts}.png")
+            fig.tight_layout()
+            fig.savefig(png_path, dpi=130)
             plt.close(fig)
             info(f"Saved equity curve plot to {png_path}")
 
+    if load_state is not None and os.path.exists(
+        os.path.join("cache", "portfolio_state.json")
+    ):
+        try:
+            st = load_state(default_cash=args.equity)
+            rows_state = summarize_state(st, ind)
+            if rows_state:
+                print_table(
+                    "Portfolio Status (Preview)",
+                    [
+                        "Ticker — Name",
+                        "Close",
+                        "Entry",
+                        "Stop",
+                        "Trail",
+                        "Shares",
+                        "Sector",
+                    ],
+                    rows_state,
+                )
+        except Exception:
+            pass
 
-# -----------------------------
+
 if __name__ == "__main__":
     args = build_parser().parse_args()
     main(args)
