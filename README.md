@@ -2,168 +2,195 @@
 
 > **Note:** This repository is for **personal use**. I’m not seeking or accepting external contributions or issues.
 
-This project contains my end-to-end pipeline for **regime-aware swing/position trading** on the Saudi market. The focus is on **finding the strongest names during healthy market regimes**, entering on **breakouts or momentum-friendly pullbacks**, and **exiting quickly** when trend conditions deteriorate. The code is intentionally pragmatic rather than academic.
+This project contains my end-to-end pipeline for **regime-aware swing/position trading** on the Saudi market (Tadawul). The system is pragmatic: focus on **healthy regimes**, buy **leaders among leaders** on actionable triggers, and **cut risk fast**.
 
 ---
 
-## Strategy Overview
+## What’s New (Aug 2025)
+
+- **Workflow automation**: `workflow.py` now provides **weekly**, **daily**, and **monthly** routines.
+  - **Weekly (weekend)**: refresh Fundamentals Score (FS), sector RS, market regime, and rebuild the watchlist (pre-ranked by CompositeRank).
+  - **Daily (after close)**: update technicals, recompute triggers (**D1/D2/DB55**), apply **correlation** and **sector caps**, **regime-gated capacity**, risk-based sizing, and **MOC** entries. Manage live positions (raise trails, 2R reductions, time stop).
+  - **Monthly**: a light health dashboard (Sharpe, MaxDD, etc.).
+- **Backtest ↔ Workflow alignment**: live workflow mirrors the backtest selection logic:
+  - Triggers include **D1**, **D2**, and **DB55**.
+  - Entries are **MOC at today’s close** (no buy-stops).
+  - **Regime gating** of capacity: **3/3 → full**, **2/3 → -1 slot**, **1/3 → 1 slot**, **0/3 → 0**.
+  - Static fundamentals gate in workflow to match backtest default (no manual override during daily run).
+- **Benchmark everywhere**: portfolio backtest prints a **side-by-side stat table** vs **^TASI.SR** and overlays the benchmark on the plot.
+- **Improved equity plot**: thousands separator (SAR) on left axis, **% change** on right axis, grid, and **Max Drawdown annotation**.
+- **Permanent, incremental price cache**: historical prices are saved permanently; new bars are **appended** (no daily full refetch). Weekend (Fri/Sat) spans are tolerated without warnings.
+- **“Ticker — Name” in tables**: company name is printed alongside the ticker in reports.
+- **Backtest end snapshot**: always prints an **Active Positions at End of Backtest** section (shows a table or a “None” panel).
+- **Preview clarity**: in `main.py`, the sizing table is labeled **“What-If Position Sizing (Preview — no orders placed)”** to avoid confusion.
+
+---
+
+## Strategy Overview (unchanged core)
 
 ### 1) Market Regime & Exposure
-The portfolio opens new trades only when the **market tape** is supportive. Three signals are evaluated daily:
-1. **Index above SMA200 with SMA200 slope rising** (trend confirmation)  
-2. **Index above EMA50** (near-term support)  
-3. **Breadth**: ≥ a threshold of the universe above SMA50 (internal strength)
+Three daily checks on the index and breadth:
+1. **Idx > SMA200 & SMA200 rising (20 bars slope)**  
+2. **Idx > EMA50**  
+3. **Breadth** ≥ threshold (**% of universe above SMA50**)
 
-- **3/3 signals true** → full capacity and full per-trade risk  
-- **2/3 signals true** → reduced capacity and **half** per-trade risk  
-- **<2/3** → **no new entries**  
-- If portfolio drawdown hits a max threshold, **all positions are flattened** and a cooldown period begins before new entries are allowed.
+Capacity by regime score:
+- **3/3** → full capacity (`MAX_CONCURRENT_POSITIONS`)
+- **2/3** → capacity reduced by 1
+- **1/3** → **1 slot**
+- **0/3** → **no new entries**
+
+A **portfolio max drawdown** triggers **flatten** and a **cooldown** period before re-entry.
 
 ### 2) Universe & Liquidity
-From a user-specified universe, names must satisfy basic **liquidity & price** constraints (e.g., 20-day value traded, 20-day volume, minimum price). This keeps the portfolio implementable and avoids micro illiquidity.
+From `universe.txt`. Minimum **20d value traded**, **20d volume**, and **min price** filters.
 
-### 3) Sector Strength & Relative Strength (RS)
-- Compute **sector strength** (e.g., 20-day sector return vs the index) and only consider sectors in the top percentile bucket.  
-- Within those sectors, rank tickers by **within-sector RS** and require **RS ≥ 70th percentile** for entry consideration. This pushes exposure into **leaders among leaders**.
+### 3) Sector & RS
+- Only consider **top-percentile sectors** by 20d sector RS vs index.
+- Within those sectors, require **within-sector RS ≥ 70th percentile**.
 
-### 4) Entries (Any Trigger Can Fire)
-The strategy blends **breakout and pullback** styles to adapt to what the market offers:
-- **D1 – Breakout**: Price confirming momentum with volume and trend filters in place.  
-- **D2 – Pullback-and-Go**: A shallow pullback that holds above key MAs, then re-accelerates.  
-- **DB55 – Donchian Breakout** (configurable lookback, default 55): Close reaches the highest high over the lookback window, with minimum ADX and volume confirmation and price above SMA200.
+### 4) Entries (Any trigger can fire)
+- **D1** (breakout confirmation), **D2** (pullback-and-go), **DB55** (Donchian breakout).  
+- **Workflow and backtest both use MOC** fills for entries.
 
-This trio covers **fresh breakouts**, **continuations after shallow dips**, and **persistent trend resumption**.
+### 5) Risk & Allocation
+- **Risk-per-trade** sizing off an **initial stop** (ATR/swing-low based).
+- **Max position weight**, **correlation limit**, and **sector cap**.
 
-### 5) Position Sizing & Risk
-- **Risk-per-trade** based sizing using **initial stop** (e.g., ATR-based or recent swing low).  
-- **Max position weight** caps.  
-- **Correlation filter** to avoid clustering similar names the same day.  
-- **Sector cap** to prevent concentration.
+### 6) Exits & Management
+- **Initial stop** from entry; **scale ½ at +2R** and raise to **breakeven**.
+- **Chandelier trail** (~20, 3×ATR).
+- **Trend deterioration**: two closes below **EMA20**; **weakness**: Close < EMA50 and low ADX.
+- **Time stop** after max holding days.
 
-### 6) Exits & Scaling
-- **Initial stop** from entry (risk-based).  
-- **Scale-out**: take partial profits at **+2R**, then raise stop to breakeven on the remainder.  
-- **Chandelier trailing stop** (20, 3×ATR) to lock in trends.  
-- **Trend exit**: **two closes below EMA20**.  
-- **Weakness exit**: Close below EMA50 **and** ADX < 15.  
-- **Time stop** after a maximum holding period.
-
-These rules are designed to **let winners run** but **cut losers/laggards** without hesitation.
-
-> **Important:** An optional “static” fundamentals gate is available for experimentation, but using today’s fundamentals to judge past trades can **introduce look-ahead bias**. For unbiased backtests use fundamentals gating **off**.
+> Fundamentals: A static fundamentals gate is available (used by default in backtests and mirrored by the daily workflow for alignment). For unbiased historical tests consider turning it off.
 
 ---
 
-## Results (Backtest)
+## Updated Results
 
-**Backtest window:** 2022-01-01 → 2025-02-06  
-**Benchmark:** TASI’s CAGR during the same period ≈ **3.14%**
+**Backtest window:** 2022‑01‑01 → 2025‑08‑14  
+**Benchmark:** **^TASI.SR** (buy & hold)
 
-**Portfolio Stats**
+**Portfolio Stats (vs Benchmark)**
 
-| Metric | Value  |
-|:------:|:------:|
-| CAGR   | 0.0767 |
-| Vol    | 0.1044 |
-| Sharpe | 0.7597 |
-| MaxDD  | -0.1047 |
+| Metric | Portfolio | Benchmark (^TASI.SR) |
+|:--:|:--:|:--:|
+| **CAGR** | **0.1446** | **-0.0126** |
+| **Vol** | **0.1192** | **0.1395** |
+| **Sharpe** | **1.1926** | **-0.0210** |
+| **MaxDD** | **-0.1046** | **-0.2781** |
 
-**Brief interpretation**  
-- **CAGR 7.67%**: Annualized growth rate of the equity curve over the backtest. This **outpaced TASI (~3.14%)** in the same window.  
-- **Vol 10.44%**: Annualized volatility; reflects the swing in returns. Lower is generally smoother.  
-- **Sharpe 0.76**: Return per unit of volatility (≈ excess return normalized by risk).  
-- **MaxDD -10.5%**: Worst peak-to-trough drawdown; indicates risk of loss from equity highs.
-
-### Equity Curve
-![Equity Curve](https://github.com/oalotaik/saudi-swing-strategy/blob/main/assets/equity_curve_20250815_131846.png)
-
-> Backtests are not guarantees of future results. Slippage, fees, data errors, halts, and structural market shifts will impact live performance.
+**Notes**: The improvement (vs older settings) comes from allowing **1 slot at a 1/3 regime**, which increases participation while keeping risk controls intact. Flat equity near the end of the window is expected when the regime score drops to **0/3** (no new entries).
 
 ---
 
-## Project Structure
+## From‑Zero Sequence (Fresh Start Without Re‑Downloading History)
+
+> Use this if you’ve **deleted state files** and want to restart live tracking **without refetching history**.
+
+1) **Prep**
+   - Ensure `universe.txt` (one ticker per line, e.g., `1321.SR`).
+   - (Optional) `manual_fundamentals.csv` for overrides (ticker, metric, value, period).
+
+2) **(Optional) One‑shot warm‑up** — only when you truly have no local prices:
+   ```bash
+   python main.py --refresh-prices --universe universe.txt
+   ```
+   - Downloads and saves **permanent** price history, then subsequent runs append **incrementally**.
+   - Rebuilds local company **names/sectors** metadata and computes fundamentals (cached per `FUNDAMENTAL_CACHE_DAYS`).
+
+3) **Weekly refresh (watchlist & sector RS)** — uses cached data:
+   ```bash
+   python workflow.py --weekly --universe universe.txt
+   ```
+
+4) **First daily run (initializes live state)**:
+   ```bash
+   python workflow.py --daily --universe universe.txt --equity 100000
+   ```
+   This creates and maintains:
+   - `cache/portfolio_state.json` (cash/positions)
+   - `cache/equity_history.csv` (daily equity)
+   - `cache/trades_log.csv` (executed actions)
+
+**Resetting only the portfolio state** (do **not** delete price/fundamental caches):
+```bash
+# Windows PowerShell
+Remove-Item .\cache\portfolio_state.json -ErrorAction SilentlyContinue
+Remove-Item .\cache\equity_history.csv -ErrorAction SilentlyContinue
+Remove-Item .\cache	rades_log.csv -ErrorAction SilentlyContinue
+
+# macOS/Linux
+rm -f cache/portfolio_state.json cache/equity_history.csv cache/trades_log.csv
+```
+Then run the daily workflow again with `--equity` to seed cash.
+
+---
+
+## CLI Cheatsheet
+
+**Backtest (with benchmark overlay & plot):**
+```bash
+python main.py --portfolio-backtest --bt-start 2022-01-01 --bt-end 2025-08-14 --equity 100000 --bt-fundamentals static --plot
+```
+
+**Daily workflow (after close):**
+```bash
+python workflow.py --daily --universe universe.txt --equity 100000
+```
+
+**Weekly refresh (weekend):**
+```bash
+python workflow.py --weekly --universe universe.txt
+```
+
+**Monthly dashboard:**
+```bash
+python workflow.py --monthly
+```
+
+---
+
+## Data & Caching Behavior
+
+- **Prices**: permanently cached; runs perform **incremental** appends only. Non‑trading‑day spans (Fri/Sat) are tolerated without errors.
+- **Fundamentals**: cached for `FUNDAMENTAL_CACHE_DAYS` (default **7**); weekly run recomputes FS and sector‑relative percentiles.
+- **Index ticker**: `^TASI.SR` as defined in `config.py`.
+
+---
+
+## Project Structure (key files)
 
 ```
 .
-├── main.py                  # CLI: end-to-end pipeline; screening, ranking, backtesting, reporting
-├── backtest.py              # Portfolio simulator (regime-aware, entries/exits, risk, DD controls)
-├── data_fetcher.py          # Data I/O with 1-day price cache + company names & sectors cache
-├── screening.py             # Liquidity & technical screening helpers (diagnostics/overview)
-├── technicals.py            # Indicators & entry triggers (EMA/SMA/RSI/ATR/ADX/Donchian, etc.)
-├── fundamentals.py          # Fundamental score (FS) & sector-relative scoring (optional)
-├── ranking.py               # Tech/Fund/Sector composite scoring
-├── reporting.py             # Rich TUI helpers for colored tables/panels
-├── risk.py                  # Position sizing, weight caps, simple correlation utilities
-├── config.py                # All thresholds & knobs (lookbacks, risks, limits, gates)
-├── universe.txt             # One ticker per line (e.g., 1321.SR); comments start with '#'
-├── assets/                  # Git-tracked images for README (published plot lives here)
-│   └── equity_curve.png
-├── output/                  # Untracked artifacts (plots & CSVs generated locally)
-├── cache/                   # Untracked cached data (prices, fundamentals, metadata)
-│   ├── prices/
-│   └── fundamentals/
-└── manual_fundamentals.csv  # Optional overrides (ticker, metric, value, period)
+├── workflow.py              # Daily/weekly/monthly automation (mirrors backtest logic)
+├── main.py                  # End-to-end pipeline, screening/ranking, backtest runner & reporting
+├── backtest.py              # Portfolio simulator (MOC entries; D1/D2/DB55; regime-gated capacity)
+├── data_fetcher.py          # Permanent incremental price cache, fundamentals & company metadata
+├── technicals.py            # Indicators & D1/D2/DB55 triggers
+├── fundamentals.py          # FS computation + sector-relative scoring (cached)
+├── ranking.py               # CompositeRank: TECH/FUND/SECTOR weights from config
+├── screening.py             # Liquidity & posture
+├── risk.py                  # Risk-based sizing, caps, correlations
+├── reporting.py             # Rich TUI helpers; colored tables/panels
+├── config.py                # Thresholds & knobs
+├── universe.txt             # One ticker per line
+└── cache/                   # Local persistent caches (prices, fundamentals, state)
 ```
 
+---
+
+## Caveats
+
+- **No slippage/fees** modeled by default. Live results will differ.
+- Yahoo Finance data gaps/outliers may occur; code uses as‑of logic for robustness.
+- This is **not financial advice**; for research/education only.
 
 ---
 
-## Quick Start (Minimal)
+## License & Contact
 
-> This section is intentionally short. The code is for personal use; only the essentials are listed for anyone who still wants to try it.
-
-### 1) Python Env
-- Python **3.10+** recommended
-- Create a venv and install the basics:
-  ```bash
-  python -m venv .venv
-  source .venv/bin/activate  # Windows: .venv\Scripts\activate
-  python -m pip install --upgrade pip wheel
-  python -m pip install pandas numpy yfinance rich matplotlib
-  ```
-  > `matplotlib` is optional; it’s only needed if you want to save equity curve plots.
-
-### 2) Universe & Config
-- Put your tickers in `universe.txt`, one per line (e.g., `1321.SR`).  
-- Adjust thresholds in `config.py` (liquidity, regime, risk, etc.).  
-
-
-### 3) Run a Diagnosis
-```bash
-python diagnose.py
-```
-
-### 4) Portfolio Backtest
-```bash
-python main.py --universe universe.txt   --portfolio-backtest   --bt-start 2022-01-01 --bt-end 2025-02-06   --equity 100000   --plot
-```
-- Use `--refresh-prices` to ignore the **1-day cache** on prices.  
-- Use `--bt-fundamentals none` for unbiased backtests (recommended) or `static` for experimentation.  
-- If you want more history, add a CLI flag for `--lookback-days` (the default may be 500 in some versions).
-
-**Outputs**
-- CSV of trades: `output/trades_YYYYMMDD_HHMMSS.csv`  
-- Equity plot (if matplotlib present): `output/equity_curve_YYYYMMDD_HHMMSS.png`
-
----
-
-## Assumptions, Data, and Caveats
-
-- Prices & company metadata use **Yahoo Finance**. Data quality varies across tickers/holidays and may have missing bars. The backtester uses **as-of** logic (last available close ≤ date) to handle gaps.  
-- No transaction costs, taxes, or slippage are modeled by default unless you add them.  
-- The optional fundamentals gate can introduce **look-ahead bias** in backtests.  
-- This is **not financial advice**. It’s a personal research tool; use at your own risk.
-
----
-
-## Contributions & License
-
-- **Contributions:** Not accepted. This is a personal project.  
-- **Issues/PRs:** Closed by default.  
-- **License:** Private use. If you want to reuse any part, please reach out first.
-
----
-
-## Contact
-
-If you’ve cloned this for personal learning and have a question about the **strategy** (not the code internals), feel free to ask privately.
+- **License**: Private / personal use.
+- **Contributions**: Not accepted.
+- **Contact**: Reach out privately if you have non‑code questions about the strategy.
