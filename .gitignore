@@ -116,3 +116,5 @@ output/
 reports/
 backtests/
 data/
+notes/
+notes/**
