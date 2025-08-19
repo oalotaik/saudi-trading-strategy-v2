@@ -229,7 +229,9 @@ def main(args):
     with _make_progress(disabled=args.no_progress) as progress:
         t_sec = progress.add_task("Sector strength", total=len(unique_secs))
         idx_ret20 = (
-            idx_ind["Close"].pct_change(20).iloc[-1] if len(idx_ind) >= 21 else np.nan
+            idx_ind["Close"].pct_change(config.SECTOR_RS_LOOKBACK).iloc[-1]
+            if len(idx_ind) >= 21
+            else np.nan
         )
         for sec in unique_secs:
             members = [
@@ -240,7 +242,7 @@ def main(args):
             if members:
                 rlist = []
                 for t in members:
-                    r = ind[t]["Close"].pct_change(20).iloc[-1]
+                    r = ind[t]["Close"].pct_change(config.SECTOR_RS_LOOKBACK).iloc[-1]
                     if pd.notna(r):
                         rlist.append(r)
                 if rlist:
@@ -264,7 +266,10 @@ def main(args):
         if not members:
             continue
         ser = pd.Series(
-            {t: ind[t]["Close"].pct_change(20).iloc[-1] for t in members}
+            {
+                t: ind[t]["Close"].pct_change(config.SECTOR_RS_LOOKBACK).iloc[-1]
+                for t in members
+            }
         ).dropna()
         if ser.empty:
             continue
@@ -454,6 +459,7 @@ def main(args):
             ["Date", "Ticker — Name", "Action", "Price", "Shares", "Reason"],
             trows,
         )
+
         # Snapshot of active positions at end (always show a section)
         snap = []
         for p in res.open_positions or []:
@@ -461,14 +467,16 @@ def main(args):
                 last_px = ind[p.ticker].iloc[-1]["Close"]
             except Exception:
                 last_px = float("nan")
-            snap.append([
-                fmt_ticker_and_name(p.ticker, names.get(p.ticker)),
-                p.sector,
-                f"{p.entry:.2f}",
-                f"{p.stop:.2f}",
-                f"{last_px:.2f}",
-                int(p.shares),
-            ])
+            snap.append(
+                [
+                    fmt_ticker_and_name(p.ticker, names.get(p.ticker)),
+                    p.sector,
+                    f"{p.entry:.2f}",
+                    f"{p.stop:.2f}",
+                    f"{last_px:.2f}",
+                    int(p.shares),
+                ]
+            )
         if snap:
             print_table(
                 "Active Positions at End of Backtest",
@@ -476,7 +484,43 @@ def main(args):
                 snap,
             )
         else:
-            print_panel("Active Positions at End of Backtest", "None (all positions closed by end date)")
+            print_panel(
+                "Active Positions at End of Backtest",
+                "None (all positions closed by end date)",
+            )
+        # Save ALL trades to CSV in output/  (keeps "Ticker — Name")
+        try:
+            os.makedirs("output", exist_ok=True)
+            # Build a full trades DataFrame
+            trades_df = pd.DataFrame(
+                [
+                    {
+                        "Date": tr.date.strftime("%Y-%m-%d")
+                        if hasattr(tr.date, "strftime")
+                        else str(tr.date),
+                        "Ticker": tr.ticker,
+                        "Name": names.get(tr.ticker, ""),
+                        "Ticker — Name": fmt_ticker_and_name(
+                            tr.ticker, names.get(tr.ticker)
+                        ),
+                        "Action": tr.action,
+                        "Price": float(tr.price),
+                        "Shares": int(tr.shares),
+                        "Reason": tr.reason,
+                    }
+                    for tr in (res.trades or [])
+                ]
+            )
+            if not trades_df.empty:
+                # Helpful filename using backtest window if provided
+                start_tag = (args.bt_start or "all").replace(":", "-")
+                end_tag = (args.bt_end or "latest").replace(":", "-")
+                csv_path = os.path.join("output", f"trades_{start_tag}_{end_tag}.csv")
+                trades_df.to_csv(csv_path, index=False, encoding="utf-8-sig")
+                info(f"Saved trades CSV to {csv_path}")
+        except Exception as _e:
+            # Non-fatal: keep the run going even if CSV write fails
+            pass
 
         if args.plot:
             os.makedirs("output", exist_ok=True)

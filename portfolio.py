@@ -161,7 +161,8 @@ def select_candidates(ind: Dict[str, pd.DataFrame],
                       sectors: Dict[str, str],
                       triggers: Dict[str, Dict[str, bool]],
                       sector_rank_pct: Dict[str, float],
-                      rs_pct_within_sector: Dict[str, float]) -> List[Tuple[str, str, str]]:
+                      rs_pct_within_sector: Dict[str, float],
+                      fs_map: Dict[str, float]) -> List[Tuple[str, str, str]]:
     """Mirror backtest selection ordering via CompositeRank."""
     out = []
     from ranking import tech_score, composite_rank
@@ -179,7 +180,7 @@ def select_candidates(ind: Dict[str, pd.DataFrame],
             continue
         rs = rs_pct_within_sector.get(t, 50.0)
         tech = tech_score(df, rs)
-        fund = 70.0
+        fund = float(fs_map.get(t, 70.0))
         sect = sector_rank_pct.get(sec, 50.0)
         comp = composite_rank(tech, fund, sect)
         out.append((t, trig, sec, comp))

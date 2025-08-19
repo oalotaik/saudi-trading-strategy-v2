@@ -57,7 +57,7 @@ CORRELATION_LOOKBACK = 60
 MAX_CORRELATION = 0.60
 
 # Selection
-MAX_CONCURRENT_POSITIONS = 5  # tried 6 and 4 performed worse than 5
+MAX_CONCURRENT_POSITIONS = 5  # tried 6 and 4, both performed worse than 5
 MAX_PER_SECTOR = 2  # max 1 position per sector
 
 # Ranking weights

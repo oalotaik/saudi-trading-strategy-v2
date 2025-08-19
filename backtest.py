@@ -90,7 +90,7 @@ def portfolio_backtest(
         dates = dates[dates <= pd.to_datetime(end)]
 
     # Pre-compute 20d returns
-    ret20 = {t: ind[t]["Close"].pct_change(20) for t in ind}
+    ret20 = {t: ind[t]["Close"].pct_change(config.SECTOR_RS_LOOKBACK) for t in ind}
     # Sector mean 20d returns
     unique_sectors = set(sectors.values())
     sector_ret20 = {}
@@ -101,7 +101,7 @@ def portfolio_backtest(
         df = pd.DataFrame({t: ret20[t] for t in members})
         sector_ret20[sec] = df.mean(axis=1)
 
-    idx_ret20 = index_ind["Close"].pct_change(20)
+    idx_ret20 = index_ind["Close"].pct_change(config.SECTOR_RS_LOOKBACK)
 
     # Fundamentals (static gating if requested)
     fs_static_pass = {t: True for t in price.keys()}
@@ -280,7 +280,7 @@ def portfolio_backtest(
                 members = [t for t, s in sectors.items() if s == sec and t in ind]
                 vals = {}
                 for t in members:
-                    series = ind[t]["Close"].pct_change(20)
+                    series = ind[t]["Close"].pct_change(config.SECTOR_RS_LOOKBACK)
                     if dt in series.index:
                         vals[t] = series.loc[dt]
                     else:
