@@ -2,12 +2,11 @@
 
 A rules-based position-trading system for TASI stocks. It combines **fundamentals (FS)**, **sector strength (RS)**, and **technicals** (D1/D2/DB55 setups), then enforces **correlation** and **sector caps**, and sizes positions by risk.
 
-All console reports keep **“Ticker — Name”** next to every ticker.
 
 ---
 
 ## What’s new in this version
-- **Incremental price updates** now depend on the **last `Date` in the CSV**, not file modified time. The loader backfills a **small buffer (5 days)**, appends only new rows, dedupes by date, and keeps the **full local history**.
+- **Incremental price updates** now depend on the **last `Date` in the cached CSV**, not file modified time. The loader backfills a **small buffer (5 days)**, appends only new rows, dedupes by date, and keeps the **full local history**.
 - **FS is persisted** to cached fundamentals (`FS`, `fs_date`, `fs_sector`) after weekly/daily recomputation.
 - **CompositeRank uses real FS** during daily ordering (FS still gates eligibility).
 - **Sector RS lookback** is read from `config.SECTOR_RS_LOOKBACK` (default: 20d) rather than a hardcoded value.
@@ -17,7 +16,7 @@ All console reports keep **“Ticker — Name”** next to every ticker.
 
 ## Strategy (high level)
 1. **Universe** from `universe.txt` (one ticker per line, e.g., `1321.SR`).  
-2. **Regime** filter using ^TASI.SR + breadth (% above SMA50).  
+2. **Regime** filter using ^TASI.SR + breadth (% of stocks above their SMA50).  
 3. **Sectors** ranked by RS over `SECTOR_RS_LOOKBACK`; within-sector RS percentiles for members.  
 4. **Fundamentals (FS)**: weighted, sector-relative score; must pass absolute and sector-top thresholds.  
 5. **Technicals**: uptrend posture + setups (D1 / D2 / DB55).  
@@ -118,10 +117,10 @@ Progressive checks for prices, indicators, screens, fundamentals, and near-miss 
 
 ## Backtest (optional)
 ```bash
-python backtest.py --universe universe.txt
+python backtest.py --universe universe.txt --plot
 ```
-- Plots equity to `output/`.  
-- (If you add the snippet from the docstring comment) saves **trades CSV** to `output/trades_*.csv`.
+- Plots equity to `output/` if `--plot` is used.  
+- Saves **trades CSV** to `output/trades_*.csv`.
 
 > Backtests are **not** part of `workflow.py` daily/weekly runs.
 
