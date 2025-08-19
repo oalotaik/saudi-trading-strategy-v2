@@ -1,197 +1,139 @@
-# Saudi Swing Strategy (Personal Use)
+# Saudi Trading Strategy — README
 
-> **Note:** This repository is for **personal use**. I’m not seeking or accepting external contributions or issues.
+A rules-based position-trading system for TASI stocks. It combines **fundamentals (FS)**, **sector strength (RS)**, and **technicals** (D1/D2/DB55 setups), then enforces **correlation** and **sector caps**, and sizes positions by risk.
 
-This project contains my end-to-end pipeline for **regime-aware swing/position trading** on the Saudi market (Tadawul). The system is pragmatic: focus on **healthy regimes**, buy **leaders among leaders** on actionable triggers, and **cut risk fast**.
-
----
-
-## What’s New (Aug 2025)
-
-- **Workflow automation**: `workflow.py` now provides **weekly**, **daily**, and **monthly** routines.
-  - **Weekly (weekend)**: refresh Fundamentals Score (FS), sector RS, market regime, and rebuild the watchlist (pre-ranked by CompositeRank).
-  - **Daily (after close)**: update technicals, recompute triggers (**D1/D2/DB55**), apply **correlation** and **sector caps**, **regime-gated capacity**, risk-based sizing, and **MOC** entries. Manage live positions (raise trails, 2R reductions, time stop).
-  - **Monthly**: a light health dashboard (Sharpe, MaxDD, etc.).
-- **Backtest ↔ Workflow alignment**: live workflow mirrors the backtest selection logic:
-  - Triggers include **D1**, **D2**, and **DB55**.
-  - Entries are **MOC at today’s close** (no buy-stops).
-  - **Regime gating** of capacity: **3/3 → full**, **2/3 → -1 slot**, **1/3 → 1 slot**, **0/3 → 0**.
-  - Static fundamentals gate in workflow to match backtest default (no manual override during daily run).
-- **Benchmark everywhere**: portfolio backtest prints a **side-by-side stat table** vs **^TASI.SR** and overlays the benchmark on the plot.
-- **Improved equity plot**: thousands separator (SAR) on left axis, **% change** on right axis, grid, and **Max Drawdown annotation**.
-- **Permanent, incremental price cache**: historical prices are saved permanently; new bars are **appended** (no daily full refetch). Weekend (Fri/Sat) spans are tolerated without warnings.
-- **“Ticker — Name” in tables**: company name is printed alongside the ticker in reports.
-- **Backtest end snapshot**: always prints an **Active Positions at End of Backtest** section (shows a table or a “None” panel).
-- **Preview clarity**: in `main.py`, the sizing table is labeled **“What-If Position Sizing (Preview — no orders placed)”** to avoid confusion.
+All console reports keep **“Ticker — Name”** next to every ticker.
 
 ---
 
-## Strategy Overview (unchanged core)
-
-### 1) Market Regime & Exposure
-Three daily checks on the index and breadth:
-1. **Idx > SMA200 & SMA200 rising (20 bars slope)**  
-2. **Idx > EMA50**  
-3. **Breadth** ≥ threshold (**% of universe above SMA50**)
-
-Capacity by regime score:
-- **3/3** → full capacity (`MAX_CONCURRENT_POSITIONS`)
-- **2/3** → capacity reduced by 1
-- **1/3** → **1 slot**
-- **0/3** → **no new entries**
-
-A **portfolio max drawdown** triggers **flatten** and a **cooldown** period before re-entry.
-
-### 2) Universe & Liquidity
-From `universe.txt`. Minimum **20d value traded**, **20d volume**, and **min price** filters.
-
-### 3) Sector & RS
-- Only consider **top-percentile sectors** by 20d sector RS vs index.
-- Within those sectors, require **within-sector RS ≥ 70th percentile**.
-
-### 4) Entries (Any trigger can fire)
-- **D1** (breakout confirmation), **D2** (pullback-and-go), **DB55** (Donchian breakout).  
-- **Workflow and backtest both use MOC** fills for entries.
-
-### 5) Risk & Allocation
-- **Risk-per-trade** sizing off an **initial stop** (ATR/swing-low based).
-- **Max position weight**, **correlation limit**, and **sector cap**.
-
-### 6) Exits & Management
-- **Initial stop** from entry; **scale ½ at +2R** and raise to **breakeven**.
-- **Chandelier trail** (~20, 3×ATR).
-- **Trend deterioration**: two closes below **EMA20**; **weakness**: Close < EMA50 and low ADX.
-- **Time stop** after max holding days.
-
-> Fundamentals: A static fundamentals gate is available (used by default in backtests and mirrored by the daily workflow for alignment). For unbiased historical tests consider turning it off.
+## What’s new in this version
+- **Incremental price updates** now depend on the **last `Date` in the CSV**, not file modified time. The loader backfills a **small buffer (5 days)**, appends only new rows, dedupes by date, and keeps the **full local history**.
+- **FS is persisted** to cached fundamentals (`FS`, `fs_date`, `fs_sector`) after weekly/daily recomputation.
+- **CompositeRank uses real FS** during daily ordering (FS still gates eligibility).
+- **Sector RS lookback** is read from `config.SECTOR_RS_LOOKBACK` (default: 20d) rather than a hardcoded value.
+- Added a lightweight **diagnostic** utility: `diagnose_quickcheck.py`.
 
 ---
 
-## Updated Results
-
-**Backtest window:** 2022‑01‑01 → 2025‑08‑14  
-**Benchmark:** **^TASI.SR** (buy & hold)
-
-**Portfolio Stats (vs Benchmark)**
-
-| Metric | Portfolio | Benchmark (^TASI.SR) |
-|:--:|:--:|:--:|
-| **CAGR** | **0.1446** | **-0.0126** |
-| **Vol** | **0.1192** | **0.1395** |
-| **Sharpe** | **1.1926** | **-0.0210** |
-| **MaxDD** | **-0.1046** | **-0.2781** |
-
-**Notes**: The improvement (vs older settings) comes from allowing **1 slot at a 1/3 regime**, which increases participation while keeping risk controls intact. Flat equity near the end of the window is expected when the regime score drops to **0/3** (no new entries).
-![Backtest results](https://github.com/oalotaik/saudi-swing-strategy/blob/main/assets/equity_curve_with_bench_20250817_142346.png)
+## Strategy (high level)
+1. **Universe** from `universe.txt` (one ticker per line, e.g., `1321.SR`).  
+2. **Regime** filter using ^TASI.SR + breadth (% above SMA50).  
+3. **Sectors** ranked by RS over `SECTOR_RS_LOOKBACK`; within-sector RS percentiles for members.  
+4. **Fundamentals (FS)**: weighted, sector-relative score; must pass absolute and sector-top thresholds.  
+5. **Technicals**: uptrend posture + setups (D1 / D2 / DB55).  
+6. **CompositeRank** = weighted sum of TechScore, FundScore (FS), and SectorScore.  
+7. **Selection**: apply correlation cap & sector caps, regime-aware capacity.  
+8. **Risk & Orders**: volatility-adjusted sizing, MOC or next-day buy-stops, stops/trailing, reductions, time stops.
 
 ---
 
-## From‑Zero Sequence (Fresh Start Without Re‑Downloading History)
-
-> Use this if you’ve **deleted state files** and want to restart live tracking **without refetching history**.
-
-1) **Prep**
-   - Ensure `universe.txt` (one ticker per line, e.g., `1321.SR`).
-   - (Optional) `manual_fundamentals.csv` for overrides (ticker, metric, value, period).
-
-2) **(Optional) One‑shot warm‑up** — only when you truly have no local prices:
-   ```bash
-   python main.py --refresh-prices --universe universe.txt
-   ```
-   - Downloads and saves **permanent** price history, then subsequent runs append **incrementally**.
-   - Rebuilds local company **names/sectors** metadata and computes fundamentals (cached per `FUNDAMENTAL_CACHE_DAYS`).
-
-3) **Weekly refresh (watchlist & sector RS)** — uses cached data:
-   ```bash
-   python workflow.py --weekly --universe universe.txt
-   ```
-
-4) **First daily run (initializes live state)**:
-   ```bash
-   python workflow.py --daily --universe universe.txt --equity 100000
-   ```
-   This creates and maintains:
-   - `cache/portfolio_state.json` (cash/positions)
-   - `cache/equity_history.csv` (daily equity)
-   - `cache/trades_log.csv` (executed actions)
-
-**Resetting only the portfolio state** (do **not** delete price/fundamental caches):
+## Installation
 ```bash
-# Windows PowerShell
-Remove-Item .\cache\portfolio_state.json -ErrorAction SilentlyContinue
-Remove-Item .\cache\equity_history.csv -ErrorAction SilentlyContinue
-Remove-Item .\cache	rades_log.csv -ErrorAction SilentlyContinue
-
-# macOS/Linux
-rm -f cache/portfolio_state.json cache/equity_history.csv cache/trades_log.csv
-```
-Then run the daily workflow again with `--equity` to seed cash.
-
----
-
-## CLI Cheatsheet
-
-**Backtest (with benchmark overlay & plot):**
-```bash
-python main.py --portfolio-backtest --bt-start 2022-01-01 --bt-end 2025-08-14 --equity 100000 --bt-fundamentals static --plot
-```
-
-**Daily workflow (after close):**
-```bash
-python workflow.py --daily --universe universe.txt --equity 100000
-```
-
-**Weekly refresh (weekend):**
-```bash
-python workflow.py --weekly --universe universe.txt
-```
-
-**Monthly dashboard:**
-```bash
-python workflow.py --monthly
+pip install -U pandas numpy yfinance rich matplotlib
 ```
 
 ---
 
-## Data & Caching Behavior
-
-- **Prices**: permanently cached; runs perform **incremental** appends only. Non‑trading‑day spans (Fri/Sat) are tolerated without errors.
-- **Fundamentals**: cached for `FUNDAMENTAL_CACHE_DAYS` (default **7**); weekly run recomputes FS and sector‑relative percentiles.
-- **Index ticker**: `^TASI.SR` as defined in `config.py`.
+## Configuration (`config.py`)
+Key items (not exhaustive):
+- `INDEX_TICKER` (default: `^TASI.SR`)
+- `SECTOR_RS_LOOKBACK` — sector and within-sector RS horizon (default 20)
+- FS gates: `FUNDAMENTAL_MIN_FS`, `FUNDAMENTAL_MIN_FS_SECTOR_TOP`
+- Liquidity filters: `MIN_AVG_DAILY_VALUE_SAR`, `MIN_AVG_DAILY_VOLUME`, `MIN_PRICE_SAR`
+- Composite weights: `TECH_WEIGHT`, `FUND_WEIGHT`, `SECTOR_WEIGHT`
+- Risk & caps: `RISK_PER_TRADE`, `MAX_POSITION_WEIGHT`, `MAX_CONCURRENT_POSITIONS`, `MAX_PER_SECTOR`
+- Correlation filter: `CORRELATION_LOOKBACK`, `MAX_CORRELATION`
+- **Note on `PRICE_CACHE_DAYS`**: now **optional failsafe**. Incremental updates key off the **last `Date`** in CSV, not mtime. Use `--refresh-prices` for a forced full re-download.
 
 ---
 
-## Project Structure (key files)
+## Project structure
+> Folders created during runs (e.g., `cache/`, `output/`) are **untracked by git**.
 
 ```
 .
-├── workflow.py              # Daily/weekly/monthly automation (mirrors backtest logic)
-├── main.py                  # End-to-end pipeline, screening/ranking, backtest runner & reporting
-├── backtest.py              # Portfolio simulator (MOC entries; D1/D2/DB55; regime-gated capacity)
-├── data_fetcher.py          # Permanent incremental price cache, fundamentals & company metadata
-├── technicals.py            # Indicators & D1/D2/DB55 triggers
-├── fundamentals.py          # FS computation + sector-relative scoring (cached)
-├── ranking.py               # CompositeRank: TECH/FUND/SECTOR weights from config
-├── screening.py             # Liquidity & posture
-├── risk.py                  # Risk-based sizing, caps, correlations
-├── reporting.py             # Rich TUI helpers; colored tables/panels
-├── config.py                # Thresholds & knobs
-├── universe.txt             # One ticker per line
-└── cache/                   # Local persistent caches (prices, fundamentals, state)
+├─ backtest.py
+├─ config.py
+├─ data_fetcher.py
+├─ diagnose.py
+├─ diagnose_quickcheck.py           # new: quick cache & FS checker
+├─ fundamentals.py
+├─ main.py
+├─ portfolio.py
+├─ ranking.py
+├─ reporting.py
+├─ risk.py
+├─ screening.py
+├─ technicals.py
+├─ workflow.py
+├─ universe.txt                     # one ticker per line
+├─ cache/                           # (runtime) local persistent cache
+│  ├─ prices/                       # CSV per ticker (full history; appended incrementally)
+│  ├─ fundamentals/                 # JSON per ticker (includes FS, fs_date, fs_sector)
+│  └─ company_meta.json             # names/sectors map
+└─ output/                          # (runtime) equity plots, trades CSVs
 ```
 
 ---
 
-## Caveats
+## Typical run order
 
-- **No slippage/fees** modeled by default. Live results will differ.
-- Yahoo Finance data gaps/outliers may occur; code uses as‑of logic for robustness.
-- This is **not financial advice**; for research/education only.
+### One-time hydration / overview
+```bash
+python main.py --universe universe.txt --refresh-prices
+```
+
+### Weekly (after the week ends)
+```bash
+python workflow.py --weekly
+```
+- Recomputes fundamentals → FS (sector-relative) and **persists FS** to cache.
+- Updates sector RS and watchlist.
+
+### Daily (after market close)
+```bash
+python workflow.py --daily
+```
+- **Incrementally** updates prices/indicators from the last `Date` in each CSV (with a small backfill buffer).
+- Refreshes TS/technicals and **CompositeRank (uses actual FS)**.
+- Applies correlation/sector caps, sizes positions, and prints the action list.
 
 ---
 
-## License & Contact
+## Diagnostics
 
-- **License**: Private / personal use.
-- **Contributions**: Not accepted.
-- **Contact**: Reach out privately if you have non‑code questions about the strategy.
+### Quick cache & FS check
+```bash
+python diagnose_quickcheck.py --universe universe.txt
+```
+Shows, per ticker: **Ticker — Name**, Cache Span, Last Date, **Appended Today?**, **FS**, fs_date, fs_sector.
+
+### Full pipeline health check
+```bash
+python diagnose.py --universe universe.txt
+```
+Progressive checks for prices, indicators, screens, fundamentals, and near-miss thresholds.
+
+---
+
+## Backtest (optional)
+```bash
+python backtest.py --universe universe.txt
+```
+- Plots equity to `output/`.  
+- (If you add the snippet from the docstring comment) saves **trades CSV** to `output/trades_*.csv`.
+
+> Backtests are **not** part of `workflow.py` daily/weekly runs.
+
+---
+
+## Notes & troubleshooting
+- **Manual CSV edits**: safe. The loader uses **last `Date`** to decide what to append and backfills a few days to capture vendor corrections.
+- **No new rows today?** Probably a non-trading day; cache stays as-is.
+- **Force full refresh**: add `--refresh-prices` to the command.
+- **Missing names next to tickers?** Ensure `cache/company_meta.json` exists. Running `main.py` or `workflow.py --weekly` typically populates it.
+
+---
+
+## Disclaimer
+This project is for research/education. Markets involve risk. Use at your own discretion.
