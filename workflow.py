@@ -295,35 +295,126 @@ def daily_after_close(
     equity, dd = mark_to_market(state, ind, dt=dt)
     trades_today = []
 
-    # Preview: What-If Position Sizing (not an order list)
-    sizing_rows = []
-    for t, trig, sec in candidates:
+    # Regime gating identical to backtest
+    breadth = 100.0 * np.mean(
+        [float(df.iloc[-1]["Close"] > df.iloc[-1]["EMA50"]) for df in ind.values()]
+    )
+    i = len(idx_ind) - 1
+    slope = (
+        (
+            idx_ind["SMA200"].iloc[i]
+            - idx_ind["SMA200"].iloc[i - config.REGIME_SLOPE_WINDOW]
+        )
+        if i >= config.REGIME_SLOPE_WINDOW
+        else 0.0
+    )
+    cond1 = (idx_ind.iloc[-1]["Close"] > idx_ind.iloc[-1]["SMA200"]) and (slope > 0)
+    cond2 = idx_ind.iloc[-1]["Close"] > idx_ind.iloc[-1]["EMA50"]
+    cond3 = breadth >= config.BREADTH_MIN_PCT_ABOVE_SMA50
+    regime_score = int(cond1) + int(cond2) + int(cond3)
+
+    # Print Market Regime (same as main.py)
+    r_txt = (
+        f"Cond1 (Idx>SMA200 & SMA200↑): {'✔' if cond1 else '✖'}\n"
+        f"Cond2 (Idx>EMA50): {'✔' if cond2 else '✖'}\n"
+        f"Cond3 (Breadth≥{config.BREADTH_MIN_PCT_ABOVE_SMA50:.0f}%): {'✔' if cond3 else '✖'}\n"
+        f"Score: {regime_score}/3   |   Breadth: {breadth:.1f}%"
+    )
+    print_panel("Market Regime", r_txt)
+
+    # === Preview: IF a trigger fires today, what enters the action list first? ===
+    # Treat every stock in selection_pool as if it had a trigger (D1=True).
+    fake_triggers = {
+        t: {"D1": True, "D2": False, "DB55": False} for t in selection_pool
+    }
+
+    # Reuse your normal candidate ranking (CompositeRank ordering, sector RS gates, FS gates, etc.)
+    hypo_candidates = select_candidates(
+        selection_pool, sectors, fake_triggers, sec_pct, rs_pct_within, fs_map
+    )  # list of (t, trig_dict, sector) already sorted in your usual order
+
+    # Apply the same *action-list* gates (capacity by regime, sector cap, correlation to held),
+    # but DO NOT execute or cash-check; we only preview the order and size.
+    from collections import Counter
+
+    held = set(state.positions.keys())
+    by_sec = Counter(sectors.get(t, "Unknown") for t in held)
+
+    capacity = max(1, config.MAX_CONCURRENT_POSITIONS)
+
+    def _max_corr_with_held_local(ticker):
+        # Same idea as portfolio correlation check, but local/small for preview
+        import pandas as pd
+
+        if not held:
+            return 0.0
+        df = pd.DataFrame()
+        for ht in held:
+            if ht in ind and not ind[ht].empty:
+                df[ht] = (
+                    ind[ht]["Close"]
+                    .pct_change()
+                    .tail(config.CORRELATION_LOOKBACK)
+                    .reset_index(drop=True)
+                )
+        if ticker not in ind or ind[ticker].empty or df.empty:
+            return float("nan")
+        df[ticker] = (
+            ind[ticker]["Close"]
+            .pct_change()
+            .tail(config.CORRELATION_LOOKBACK)
+            .reset_index(drop=True)
+        )
+        try:
+            return float(df.corr().loc[ticker, list(held)].max())
+        except Exception:
+            return float("nan")
+
+    preview_rows = []
+    for t, trig, sec in hypo_candidates:
+        if capacity <= 0:
+            break
+
+        # Sector cap gate
+        if by_sec[sec] >= config.MAX_PER_SECTOR:
+            continue
+
+        # Correlation-to-held gate
+        mc = _max_corr_with_held_local(t)
+        if mc == mc and mc > config.MAX_CORRELATION:
+            continue
+
+        # Vol-adjusted size (equity-based), no cash check (preview only)
         df_t = ind.get(t)
         if df_t is None or df_t.empty:
             continue
         last = df_t.iloc[-1]
-        entry = float(last["Close"]) if "Close" in last else float("nan")
-        atr = float(last["ATR14"]) if "ATR14" in last else float("nan")
-        swing_low = float(df_t["Low"].tail(10).min()) if "Low" in df_t else float("nan")
-        if entry == entry and atr == atr and swing_low == swing_low:
-            init_stop = max(entry - 2 * atr, swing_low - 0.5 * atr)
-            sh = position_size(equity, entry, init_stop)
-            sh = cap_weight(sh, entry, equity)
-            sizing_rows.append(
-                [
-                    fmt_ticker_and_name(t, names.get(t)),
-                    sec,
-                    f"{entry:.2f}",
-                    f"{init_stop:.2f}",
-                    int(sh),
-                ]
-            )
+        entry = float(last["Close"])
+        atr = float(last["ATR14"])
+        swing_low = float(df_t["Low"].tail(10).min())
+        init_stop = max(entry - 2 * atr, swing_low - 0.5 * atr)
+        sh = position_size(equity, entry, init_stop)
+        sh = cap_weight(sh, entry, equity)
+
+        preview_rows.append(
+            [
+                fmt_ticker_and_name(t, names.get(t)),
+                sec,
+                f"{entry:.2f}",
+                f"{init_stop:.2f}",
+                int(sh),
+            ]
+        )
+
+        by_sec[sec] += 1
+        capacity -= 1
 
     print_table(
-        "Preview: What-If Position Sizing (not an order list)",
+        "Preview (IF Trigger Fires): Action Order & Sizing",
         ["Ticker — Name", "Sector", "Entry", "InitStop", "Shares"],
-        sizing_rows,
+        preview_rows or [["(none)", "", "", "", ""]],
     )
+    # === End preview ===
 
     # Debug: Excluded by Sector RS gate (passed liquidity+posture+FS+triggers but sector RS below threshold)
     excluded_sector = []
@@ -367,32 +458,6 @@ def daily_after_close(
         state, exec_mgmt = manage_positions(state, ind, dt=dt)
         trades_today.extend(exec_mgmt)
 
-    # Regime gating identical to backtest
-    breadth = 100.0 * np.mean(
-        [float(df.iloc[-1]["Close"] > df.iloc[-1]["EMA50"]) for df in ind.values()]
-    )
-    i = len(idx_ind) - 1
-    slope = (
-        (
-            idx_ind["SMA200"].iloc[i]
-            - idx_ind["SMA200"].iloc[i - config.REGIME_SLOPE_WINDOW]
-        )
-        if i >= config.REGIME_SLOPE_WINDOW
-        else 0.0
-    )
-    cond1 = (idx_ind.iloc[-1]["Close"] > idx_ind.iloc[-1]["SMA200"]) and (slope > 0)
-    cond2 = idx_ind.iloc[-1]["Close"] > idx_ind.iloc[-1]["EMA50"]
-    cond3 = breadth >= config.BREADTH_MIN_PCT_ABOVE_SMA50
-    regime_score = int(cond1) + int(cond2) + int(cond3)
-
-    # Print Market Regime (same as main.py)
-    r_txt = (
-        f"Cond1 (Idx>SMA200 & SMA200↑): {'✔' if cond1 else '✖'}\n"
-        f"Cond2 (Idx>EMA50): {'✔' if cond2 else '✖'}\n"
-        f"Cond3 (Breadth≥{config.BREADTH_MIN_PCT_ABOVE_SMA50:.0f}%): {'✔' if cond3 else '✖'}\n"
-        f"Score: {regime_score}/3   |   Breadth: {breadth:.1f}%"
-    )
-    print_panel("Market Regime", r_txt)
     if state.cooldown > 0:
         state.cooldown -= 1
         entry_actions, mgmt_actions = [], []
