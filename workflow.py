@@ -1,4 +1,5 @@
 import argparse
+
 import pandas as pd
 import numpy as np
 
@@ -8,6 +9,7 @@ from technicals import compute_indicators, trigger_D1, trigger_D2, trigger_DB55
 from screening import liquidity_screen, technical_screen
 from fundamentals import compute_fundamental_metrics, sector_relative_scores
 from ranking import tech_score, composite_rank
+from risk import position_size, cap_weight
 from reporting import (
     print_panel,
     print_table,
@@ -82,6 +84,14 @@ def weekend_refresh(universe: list, no_progress: bool = False):
     cond3 = breadth >= config.BREADTH_MIN_PCT_ABOVE_SMA50
     regime_score = int(cond1) + int(cond2) + int(cond3)
 
+    # Print Market Regime (same as main.py)
+    r_txt = (
+        f"Cond1 (Idx>SMA200 & SMA200↑): {'✔' if cond1 else '✖'}\n"
+        f"Cond2 (Idx>EMA50): {'✔' if cond2 else '✖'}\n"
+        f"Cond3 (Breadth≥{config.BREADTH_MIN_PCT_ABOVE_SMA50:.0f}%): {'✔' if cond3 else '✖'}\n"
+        f"Score: {regime_score}/3   |   Breadth: {breadth:.1f}%"
+    )
+    print_panel("Market Regime", r_txt)
     # Fundamentals snapshot (static) for watchlist
     try:
         manual_df = pd.read_csv(config.MANUAL_FUNDAMENTALS_CSV)
@@ -194,12 +204,16 @@ def daily_after_close(
                 if s == sec and t in ind and len(ind[t]) >= 25
             ]
             if members:
+                import pandas as pd
+
                 rlist = [
                     ind[t]["Close"].pct_change(config.SECTOR_RS_LOOKBACK).iloc[-1]
                     for t in members
                 ]
                 rlist = [r for r in rlist if pd.notna(r)]
                 if rlist:
+                    import pandas as pd
+
                     sec_returns[sec] = float(
                         np.nanmean(rlist) - (idx_ret20 if pd.notna(idx_ret20) else 0.0)
                     )
@@ -281,6 +295,57 @@ def daily_after_close(
     equity, dd = mark_to_market(state, ind, dt=dt)
     trades_today = []
 
+    # Preview: What-If Position Sizing (not an order list)
+    sizing_rows = []
+    for t, trig, sec in candidates:
+        df_t = ind.get(t)
+        if df_t is None or df_t.empty:
+            continue
+        last = df_t.iloc[-1]
+        entry = float(last["Close"]) if "Close" in last else float("nan")
+        atr = float(last["ATR14"]) if "ATR14" in last else float("nan")
+        swing_low = float(df_t["Low"].tail(10).min()) if "Low" in df_t else float("nan")
+        if entry == entry and atr == atr and swing_low == swing_low:
+            init_stop = max(entry - 2 * atr, swing_low - 0.5 * atr)
+            sh = position_size(equity, entry, init_stop)
+            sh = cap_weight(sh, entry, equity)
+            sizing_rows.append(
+                [
+                    fmt_ticker_and_name(t, names.get(t)),
+                    sec,
+                    f"{entry:.2f}",
+                    f"{init_stop:.2f}",
+                    int(sh),
+                ]
+            )
+
+    print_table(
+        "Preview: What-If Position Sizing (not an order list)",
+        ["Ticker — Name", "Sector", "Entry", "InitStop", "Shares"],
+        sizing_rows,
+    )
+
+    # Debug: Excluded by Sector RS gate (passed liquidity+posture+FS+triggers but sector RS below threshold)
+    excluded_sector = []
+    for t in selection_pool.keys():
+        tr = triggers.get(t, {})
+        if not (tr.get("D1") or tr.get("D2") or tr.get("DB55")):
+            continue
+        if rs_pct_within.get(t, 50.0) < 70.0:
+            continue
+        sec2 = sectors.get(t, "Unknown")
+        sec_pct_val = sec_pct.get(sec2, 50.0)
+        if sec_pct_val < config.SECTOR_TOP_PERCENTILE:
+            excluded_sector.append(
+                [fmt_ticker_and_name(t, names.get(t)), sec2, f"{sec_pct_val:.1f}%"]
+            )
+
+    print_table(
+        "Excluded (Sector RS Gate)",
+        ["Ticker — Name", "Sector", "SectorRS%"],
+        excluded_sector,
+    )
+
     if dd <= -config.PORTFOLIO_MAX_DRAWDOWN and state.positions:
         for t, p in list(state.positions.items()):
             px = float(ind[t].loc[:dt].iloc[-1]["Close"])
@@ -320,6 +385,14 @@ def daily_after_close(
     cond3 = breadth >= config.BREADTH_MIN_PCT_ABOVE_SMA50
     regime_score = int(cond1) + int(cond2) + int(cond3)
 
+    # Print Market Regime (same as main.py)
+    r_txt = (
+        f"Cond1 (Idx>SMA200 & SMA200↑): {'✔' if cond1 else '✖'}\n"
+        f"Cond2 (Idx>EMA50): {'✔' if cond2 else '✖'}\n"
+        f"Cond3 (Breadth≥{config.BREADTH_MIN_PCT_ABOVE_SMA50:.0f}%): {'✔' if cond3 else '✖'}\n"
+        f"Score: {regime_score}/3   |   Breadth: {breadth:.1f}%"
+    )
+    print_panel("Market Regime", r_txt)
     if state.cooldown > 0:
         state.cooldown -= 1
         entry_actions, mgmt_actions = [], []
@@ -334,6 +407,51 @@ def daily_after_close(
         )
 
     # Execute entries at today's close (MOC), mirroring backtest
+    # Debug: Excluded (Correlation Gate) — candidates dropped because max corr with held > threshold
+    excluded_corr = []
+    held = set(state.positions.keys())
+    if held:
+        import pandas as pd
+
+        for t, trig, sec in candidates:
+            if any(e.get("Ticker") == t for e in entry_actions):
+                continue
+            df_corr = pd.DataFrame()
+            for ht in held:
+                if ht in ind and not ind[ht].empty:
+                    df_corr[ht] = (
+                        ind[ht]["Close"]
+                        .pct_change()
+                        .tail(config.CORRELATION_LOOKBACK)
+                        .reset_index(drop=True)
+                    )
+            if t not in ind or ind[t].empty or df_corr.empty:
+                continue
+            df_corr[t] = (
+                ind[t]["Close"]
+                .pct_change()
+                .tail(config.CORRELATION_LOOKBACK)
+                .reset_index(drop=True)
+            )
+            try:
+                mc = float(df_corr.corr().loc[t, list(held)].max())
+            except Exception:
+                mc = float("nan")
+            if mc == mc and mc > config.MAX_CORRELATION:
+                excluded_corr.append(
+                    [
+                        fmt_ticker_and_name(t, names.get(t)),
+                        sectors.get(t, "Unknown"),
+                        f"{mc:.2f}",
+                    ]
+                )
+
+    print_table(
+        "Excluded (Correlation Gate)",
+        ["Ticker — Name", "Sector", "MaxCorrWithHeld"],
+        excluded_corr,
+    )
+
     state, exec_entries = apply_entries(state, ind, entry_actions, dt=dt)
     trades_today.extend(exec_entries)
 

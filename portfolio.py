@@ -7,6 +7,8 @@ from datetime import datetime
 import pandas as pd
 import numpy as np
 
+from reporting import warn
+
 import config
 from risk import position_size, cap_weight
 
@@ -267,7 +269,9 @@ def apply_entries(state: PortfolioState, ind: Dict[str, pd.DataFrame], entries: 
         px = float(e["Price"]); sh = int(e["Shares"])
         if sh <= 0: continue
         cost = sh * px
-        if cost > state.cash: continue
+        if cost > state.cash:
+            warn(f"Skipped BUY {t} — insufficient cash (need {cost:.2f}, have {state.cash:.2f})")
+            continue
         state.cash -= cost
         last = ind[t].iloc[-1]
         atr = float(last["ATR14"])

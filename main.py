@@ -8,7 +8,7 @@ from matplotlib.ticker import FuncFormatter
 
 import config
 import data_fetcher as dfetch
-from technicals import compute_indicators, technical_posture, trigger_D1, trigger_D2
+from technicals import compute_indicators, technical_posture, trigger_D1, trigger_D2, trigger_DB55
 from screening import liquidity_screen, technical_screen
 from fundamentals import compute_fundamental_metrics, sector_relative_scores
 from ranking import tech_score, composite_rank
@@ -286,7 +286,8 @@ def main(args):
         sscore = sec_pct.get(sectors.get(t, "Unknown"), 50.0)
         comp = composite_rank(ts, fs, sscore)
         trigs = tech_res.get(t, {})
-        trig_str = f"D1={trigs.get('D1', False)}, D2={trigs.get('D2', False)}"
+        db55 = trigger_DB55(ind[t]) if t in ind and not ind[t].empty else False
+        trig_str = f"D1={trigs.get('D1', False)}, D2={trigs.get('D2', False)}, DB55={bool(db55)}"
         rank_rows.append(
             [
                 fmt_ticker_and_name(t, names.get(t)),

@@ -5,7 +5,7 @@ import numpy as np
 
 import config
 import data_fetcher as dfetch
-from technicals import compute_indicators
+from technicals import compute_indicators, trigger_DB55
 from screening import liquidity_screen, technical_screen
 from fundamentals import compute_fundamental_metrics, sector_relative_scores
 from reporting import print_panel, print_table, info, warn, error, colorize_status, fmt_ticker_and_name
@@ -135,6 +135,9 @@ def diagnose(args):
                     tech_near = True
             tech_status = "PASS" if tech_post else ("NEAR" if tech_near else "FAIL")
 
+            
+            trigs = tech.get(t, {})
+            db55 = trigger_DB55(ind[t]) if t in ind and not ind[t].empty else False
             rows.append(
                 [
                     fmt_ticker_and_name(t, names.get(t)),
@@ -142,7 +145,7 @@ def diagnose(args):
                     colorize_status("PASS" if liq.get(t, False) else "FAIL"),
                     f"{fs:.1f} ({colorize_status(fs_status)})",
                     colorize_status(tech_status),
-                    f"D1={tech.get(t, {}).get('D1', False)}, D2={tech.get(t, {}).get('D2', False)}",
+                    f"D1={trigs.get('D1', False)}, D2={trigs.get('D2', False)}, DB55={bool(db55)}",
                     f"FS pct in sector: {fs_pct.get(t, 0.0):.1f}%",
                 ]
             )
