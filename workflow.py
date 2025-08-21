@@ -328,10 +328,10 @@ def daily_after_close(
         t: {"D1": True, "D2": False, "DB55": False} for t in selection_pool
     }
 
-    # Reuse your normal candidate ranking (CompositeRank ordering, sector RS gates, FS gates, etc.)
+    # Reuse normal candidate ranking (CompositeRank ordering, sector RS gates, FS gates, etc.)
     hypo_candidates = select_candidates(
         selection_pool, sectors, fake_triggers, sec_pct, rs_pct_within, fs_map
-    )  # list of (t, trig_dict, sector) already sorted in your usual order
+    )  # list of (t, trig_dict, sector) already sorted in usual order
 
     # Apply the same *action-list* gates (capacity by regime, sector cap, correlation to held),
     # but DO NOT execute or cash-check; we only preview the order and size.
@@ -340,7 +340,9 @@ def daily_after_close(
     held = set(state.positions.keys())
     by_sec = Counter(sectors.get(t, "Unknown") for t in held)
 
-    capacity = max(1, config.MAX_CONCURRENT_POSITIONS)
+    capacity = max(
+        1, config.MAX_CONCURRENT_POSITIONS
+    )  # assuming full capacity; it's just a preview
 
     def _max_corr_with_held_local(ticker):
         # Same idea as portfolio correlation check, but local/small for preview
@@ -431,11 +433,14 @@ def daily_after_close(
                 [fmt_ticker_and_name(t, names.get(t)), sec2, f"{sec_pct_val:.1f}%"]
             )
 
-    print_table(
-        "Excluded (Sector RS Gate)",
-        ["Ticker — Name", "Sector", "SectorRS%"],
-        excluded_sector,
-    )
+    if excluded_sector:
+        print_table(
+            "Excluded (Sector RS Gate)",
+            ["Ticker — Name", "Sector", "SectorRS%"],
+            excluded_sector,
+        )
+    else:
+        print("\nSECTOR RS GATE: Nothing was excluded by sector RS solely\n")
 
     if dd <= -config.PORTFOLIO_MAX_DRAWDOWN and state.positions:
         for t, p in list(state.positions.items()):
@@ -510,12 +515,14 @@ def daily_after_close(
                         f"{mc:.2f}",
                     ]
                 )
-
-    print_table(
-        "Excluded (Correlation Gate)",
-        ["Ticker — Name", "Sector", "MaxCorrWithHeld"],
-        excluded_corr,
-    )
+    if excluded_corr:
+        print_table(
+            "Excluded (Correlation Gate)",
+            ["Ticker — Name", "Sector", "MaxCorrWithHeld"],
+            excluded_corr,
+        )
+    else:
+        print("\nCORRELATION GATE: Nothing was excluded by correlation gate solely")
 
     state, exec_entries = apply_entries(state, ind, entry_actions, dt=dt)
     trades_today.extend(exec_entries)
@@ -530,11 +537,14 @@ def daily_after_close(
     _append_trades(trades_today)
 
     rows_state = summarize_state(state, ind)
-    print_table(
-        "Portfolio Status",
-        ["Ticker — Name", "Close", "Entry", "Stop", "Trail", "Shares", "Sector"],
-        rows_state,
-    )
+    if rows_state:
+        print_table(
+            "Portfolio Status",
+            ["Ticker — Name", "Close", "Entry", "Stop", "Trail", "Shares", "Sector"],
+            rows_state,
+        )
+    else:
+        print("\nPORTFOLIO STATUS: No holdings in portfolio currently")
 
     next_actions = []
     for a in entry_actions:
@@ -556,11 +566,14 @@ def daily_after_close(
             next_actions.append([disp, "RAISE_TRAIL", f"{a['To']:.2f}", "-", "-"])
         else:
             next_actions.append([disp, a["Action"], "-", "-", "-"])
-    print_table(
-        "Next-Day Action List",
-        ["Ticker — Name", "What", "Price/To", "Shares", "Notes"],
-        next_actions,
-    )
+    if next_actions:
+        print_table(
+            "Next-Day Action List",
+            ["Ticker — Name", "What", "Price/To", "Shares", "Notes"],
+            next_actions,
+        )
+    else:
+        print("\nNEXT-DAY ACTIONS: no actions for tomorrow\n")
 
 
 def monthly_dashboard():
