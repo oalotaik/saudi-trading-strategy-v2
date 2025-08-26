@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 from dataclasses import dataclass, asdict, field
 from typing import Dict, List, Optional, Tuple
@@ -17,6 +16,7 @@ STATE_PATH = os.path.join(CACHE_DIR, "portfolio_state.json")
 HIST_PATH = os.path.join(CACHE_DIR, "equity_history.csv")
 TRADES_PATH = os.path.join(CACHE_DIR, "trades_log.csv")
 
+
 @dataclass
 class PositionState:
     ticker: str
@@ -30,6 +30,7 @@ class PositionState:
     bars_held: int = 0
     scaled: bool = False
 
+
 @dataclass
 class PortfolioState:
     cash: float
@@ -37,6 +38,7 @@ class PortfolioState:
     peak_equity: float = 0.0
     cooldown: int = 0
     last_date: Optional[str] = None
+
 
 def load_state(default_cash: float = 100000.0) -> PortfolioState:
     os.makedirs(CACHE_DIR, exist_ok=True)
@@ -54,9 +56,16 @@ def load_state(default_cash: float = 100000.0) -> PortfolioState:
             )
         except Exception:
             pass
-    st = PortfolioState(cash=default_cash, positions={}, peak_equity=default_cash, cooldown=0, last_date=None)
+    st = PortfolioState(
+        cash=default_cash,
+        positions={},
+        peak_equity=default_cash,
+        cooldown=0,
+        last_date=None,
+    )
     save_state(st)
     return st
+
 
 def save_state(state: PortfolioState) -> None:
     os.makedirs(CACHE_DIR, exist_ok=True)
@@ -70,10 +79,16 @@ def save_state(state: PortfolioState) -> None:
     with open(STATE_PATH, "w", encoding="utf-8") as f:
         json.dump(raw, f, ensure_ascii=False, indent=2)
 
+
 def _chandelier(high_close_20: float, atr: float, mult: float = 3.0) -> float:
     return high_close_20 - mult * atr
 
-def mark_to_market(state: PortfolioState, ind: Dict[str, pd.DataFrame], dt: Optional[pd.Timestamp] = None):
+
+def mark_to_market(
+    state: PortfolioState,
+    ind: Dict[str, pd.DataFrame],
+    dt: Optional[pd.Timestamp] = None,
+):
     if dt is None:
         dates = [df.index[-1] for df in ind.values() if not df.empty]
         if not dates:
@@ -94,16 +109,19 @@ def mark_to_market(state: PortfolioState, ind: Dict[str, pd.DataFrame], dt: Opti
     dd = (equity / state.peak_equity) - 1.0 if state.peak_equity > 0 else 0.0
     return equity, dd
 
+
 def _append_history(dt: pd.Timestamp, equity: float) -> None:
     os.makedirs(CACHE_DIR, exist_ok=True)
     row = {"Date": dt.strftime("%Y-%m-%d"), "Equity": float(equity)}
     if os.path.exists(HIST_PATH):
         import csv
+
         with open(HIST_PATH, "a", newline="", encoding="utf-8") as f:
-            w = csv.DictWriter(f, fieldnames=["Date","Equity"])
+            w = csv.DictWriter(f, fieldnames=["Date", "Equity"])
             w.writerow(row)
     else:
         pd.DataFrame([row]).to_csv(HIST_PATH, index=False)
+
 
 def _append_trades(trades: List[dict]) -> None:
     if not trades:
@@ -115,7 +133,10 @@ def _append_trades(trades: List[dict]) -> None:
     else:
         df.to_csv(TRADES_PATH, index=False)
 
-def manage_positions(state: PortfolioState, ind: Dict[str, pd.DataFrame], dt: pd.Timestamp):
+
+def manage_positions(
+    state: PortfolioState, ind: Dict[str, pd.DataFrame], dt: pd.Timestamp
+):
     executed = []
     to_close = []
     for t, p in list(state.positions.items()):
@@ -131,19 +152,32 @@ def manage_positions(state: PortfolioState, ind: Dict[str, pd.DataFrame], dt: pd
             sell = max(p.shares // 2, 0)
             if sell > 0:
                 state.cash += sell * float(last["Close"])
-                executed.append({"Date": dt.strftime("%Y-%m-%d"), "Ticker": t, "Action": "SELL", "Price": float(last["Close"]), "Shares": int(sell), "Reason": "SCALE_2R"})
+                executed.append(
+                    {
+                        "Date": dt.strftime("%Y-%m-%d"),
+                        "Ticker": t,
+                        "Action": "SELL",
+                        "Price": float(last["Close"]),
+                        "Shares": int(sell),
+                        "Reason": "SCALE_2R",
+                    }
+                )
                 p.shares -= sell
                 p.scaled = True
                 p.stop = max(p.stop, p.entry_price)
         idx_here = sub.index.get_indexer([sub.index[-1]], method="pad")[0]
-        high_close_20 = sub["Close"].iloc[max(0, idx_here - 19): idx_here + 1].max()
-        p.trail = max(p.trail, _chandelier(float(high_close_20), float(last["ATR14"]), 3.0))
+        high_close_20 = sub["Close"].iloc[max(0, idx_here - 19) : idx_here + 1].max()
+        p.trail = max(
+            p.trail, _chandelier(float(high_close_20), float(last["ATR14"]), 3.0)
+        )
         exit_reason = None
         if last["Close"] <= p.stop:
             exit_reason = "STOP"
         else:
             prev = sub.iloc[-2] if len(sub) >= 2 else None
-            if prev is not None and (last["Close"] < last["EMA20"] and prev["Close"] < prev["EMA20"]):
+            if prev is not None and (
+                last["Close"] < last["EMA20"] and prev["Close"] < prev["EMA20"]
+            ):
                 exit_reason = "EMA20xDOWN"
             elif (last["Close"] < last["EMA50"]) and (last["ADX14"] < 15.0):
                 exit_reason = "WEAK"
@@ -153,26 +187,43 @@ def manage_positions(state: PortfolioState, ind: Dict[str, pd.DataFrame], dt: pd
                 exit_reason = "TIME"
         if exit_reason:
             state.cash += p.shares * float(last["Close"])
-            executed.append({"Date": dt.strftime("%Y-%m-%d"), "Ticker": t, "Action": "SELL", "Price": float(last["Close"]), "Shares": int(p.shares), "Reason": exit_reason})
+            executed.append(
+                {
+                    "Date": dt.strftime("%Y-%m-%d"),
+                    "Ticker": t,
+                    "Action": "SELL",
+                    "Price": float(last["Close"]),
+                    "Shares": int(p.shares),
+                    "Reason": exit_reason,
+                }
+            )
             to_close.append(t)
     for t in to_close:
         state.positions.pop(t, None)
     return state, executed
 
-def select_candidates(ind: Dict[str, pd.DataFrame],
-                      sectors: Dict[str, str],
-                      triggers: Dict[str, Dict[str, bool]],
-                      sector_rank_pct: Dict[str, float],
-                      rs_pct_within_sector: Dict[str, float],
-                      fs_map: Dict[str, float]) -> List[Tuple[str, str, str]]:
+
+def select_candidates(
+    ind: Dict[str, pd.DataFrame],
+    sectors: Dict[str, str],
+    triggers: Dict[str, Dict[str, bool]],
+    sector_rank_pct: Dict[str, float],
+    rs_pct_within_sector: Dict[str, float],
+    fs_map: Dict[str, float],
+) -> List[Tuple[str, str, str]]:
     """Mirror backtest selection ordering via CompositeRank."""
     out = []
     from ranking import tech_score, composite_rank
+
     for t, df in ind.items():
         if df.empty:
             continue
         tt = triggers.get(t, {})
-        trig = "D1" if tt.get("D1") else ("D2" if tt.get("D2") else ("DB55" if tt.get("DB55") else None))
+        trig = (
+            "D1"
+            if tt.get("D1")
+            else ("D2" if tt.get("D2") else ("DB55" if tt.get("DB55") else None))
+        )
         if trig is None:
             continue
         sec = sectors.get(t, "Unknown")
@@ -189,13 +240,17 @@ def select_candidates(ind: Dict[str, pd.DataFrame],
     out.sort(key=lambda x: x[3], reverse=True)
     return [(t, trig, sec) for (t, trig, sec, _c) in out]
 
-def build_action_list(state: PortfolioState,
-                      ind: Dict[str, pd.DataFrame],
-                      selection: List[Tuple[str, str, str]],
-                      sectors: Dict[str, str],
-                      equity_for_sizing: float,
-                      regime_score: int = 3) -> Tuple[List[dict], List[dict]]:
+
+def build_action_list(
+    state: PortfolioState,
+    ind: Dict[str, pd.DataFrame],
+    selection: List[Tuple[str, str, str]],
+    sectors: Dict[str, str],
+    equity_for_sizing: float,
+    regime_score: int = 3,
+) -> Tuple[List[dict], List[dict]]:
     from collections import defaultdict
+
     entry_actions = []
     mgmt_actions = []
     by_sec = defaultdict(int)
@@ -218,8 +273,18 @@ def build_action_list(state: PortfolioState,
         df = pd.DataFrame()
         for ht in held:
             if ht in ind and not ind[ht].empty:
-                df[ht] = ind[ht]["Close"].pct_change().tail(config.CORRELATION_LOOKBACK).reset_index(drop=True)
-        df[ticker] = ind[ticker]["Close"].pct_change().tail(config.CORRELATION_LOOKBACK).reset_index(drop=True)
+                df[ht] = (
+                    ind[ht]["Close"]
+                    .pct_change()
+                    .tail(config.CORRELATION_LOOKBACK)
+                    .reset_index(drop=True)
+                )
+        df[ticker] = (
+            ind[ticker]["Close"]
+            .pct_change()
+            .tail(config.CORRELATION_LOOKBACK)
+            .reset_index(drop=True)
+        )
         corr = df.corr().loc[ticker, list(held)].max()
         return float(corr) if pd.notna(corr) else 0.0
 
@@ -241,55 +306,113 @@ def build_action_list(state: PortfolioState,
         shares = cap_weight(shares, entry, equity_for_sizing)
         if shares <= 0:
             continue
-        entry_actions.append({
-            "Ticker": t, "Action": "MOC", "Price": round(entry, 2), "Shares": int(shares),
-            "Stop": round(stop, 2), "Sector": sec, "Reason": trig
-        })
+        entry_actions.append(
+            {
+                "Ticker": t,
+                "Action": "MOC",
+                "Price": round(entry, 2),
+                "Shares": int(shares),
+                "Stop": round(stop, 2),
+                "Sector": sec,
+                "Reason": trig,
+            }
+        )
         by_sec[sec] += 1
         capacity -= 1
 
     # Management suggestions (trailing/2R heads-up)
     for t, p in state.positions.items():
         last = ind[t].iloc[-1]
-        new_trail = max(p.trail, _chandelier(float(ind[t]["Close"].tail(20).max()), float(last["ATR14"]), 3.0))
+        new_trail = max(
+            p.trail,
+            _chandelier(
+                float(ind[t]["Close"].tail(20).max()), float(last["ATR14"]), 3.0
+            ),
+        )
         if new_trail > p.trail:
-            mgmt_actions.append({"Ticker": t, "Action": "RAISE_TRAIL", "To": round(new_trail, 2)})
+            mgmt_actions.append(
+                {"Ticker": t, "Action": "RAISE_TRAIL", "To": round(new_trail, 2)}
+            )
         if (not p.scaled) and (last["Close"] >= p.entry_price + 2 * p.r):
             mgmt_actions.append({"Ticker": t, "Action": "REDUCE_HALF_AT_2R"})
         if p.bars_held >= 59:
             mgmt_actions.append({"Ticker": t, "Action": "TIME_STOP_TOMORROW"})
     return entry_actions, mgmt_actions
 
-def apply_entries(state: PortfolioState, ind: Dict[str, pd.DataFrame], entries: List[dict], dt: pd.Timestamp):
+
+def apply_entries(
+    state: PortfolioState,
+    ind: Dict[str, pd.DataFrame],
+    entries: List[dict],
+    dt: pd.Timestamp,
+):
     executed = []
     for e in entries:
         t = e["Ticker"]
         if t in state.positions:
             continue
-        px = float(e["Price"]); sh = int(e["Shares"])
-        if sh <= 0: continue
+        px = float(e["Price"])
+        sh = int(e["Shares"])
+        if sh <= 0:
+            continue
         cost = sh * px
         if cost > state.cash:
-            warn(f"Skipped BUY {t} — insufficient cash (need {cost:.2f}, have {state.cash:.2f})")
-            continue
+            # Resize down to what cash allows (no other behavior changed)
+            max_by_cash = int(state.cash // px)
+            if max_by_cash <= 0:
+                warn(
+                    f"Skipped BUY {t} — insufficient cash (need {cost:.2f}, have {state.cash:.2f})"
+                )
+                continue
+            if max_by_cash < sh:
+                warn(
+                    f"Adjusted BUY {t}: requested {sh} shares, cash allows {max_by_cash} — buying with available cash"
+                )
+                sh = max_by_cash
+                cost = sh * px
         state.cash -= cost
         last = ind[t].iloc[-1]
         atr = float(last["ATR14"])
         r = px - float(e["Stop"])
         trail = max(float(ind[t]["Close"].tail(20).max()), px) - 3.0 * atr
         state.positions[t] = PositionState(
-            ticker=t, entry_price=px, shares=sh, stop=float(e["Stop"]), trail=float(trail),
-            r=float(r), sector=e.get("Sector",""), entry_date=dt.strftime(config.DATE_FORMAT), bars_held=0, scaled=False
+            ticker=t,
+            entry_price=px,
+            shares=sh,
+            stop=float(e["Stop"]),
+            trail=float(trail),
+            r=float(r),
+            sector=e.get("Sector", ""),
+            entry_date=dt.strftime(config.DATE_FORMAT),
+            bars_held=0,
+            scaled=False,
         )
-        executed.append({"Date": dt.strftime("%Y-%m-%d"), "Ticker": t, "Action": "BUY", "Price": px, "Shares": sh, "Reason": e.get("Reason","")})
+        executed.append(
+            {
+                "Date": dt.strftime("%Y-%m-%d"),
+                "Ticker": t,
+                "Action": "BUY",
+                "Price": px,
+                "Shares": sh,
+                "Reason": e.get("Reason", ""),
+            }
+        )
     return state, executed
 
-def summarize_state(state: PortfolioState, ind: Dict[str, pd.DataFrame]) -> List[List[str]]:
+
+def summarize_state(
+    state: PortfolioState, ind: Dict[str, pd.DataFrame]
+) -> List[List[str]]:
     rows = []
     from data_fetcher import get_company_name
+
     for t, p in state.positions.items():
         last = ind.get(t)
-        close = float(last["Close"].iloc[-1]) if last is not None and not last.empty else float("nan")
+        close = (
+            float(last["Close"].iloc[-1])
+            if last is not None and not last.empty
+            else float("nan")
+        )
         name = ""
         try:
             nm = get_company_name(t)
@@ -297,5 +420,15 @@ def summarize_state(state: PortfolioState, ind: Dict[str, pd.DataFrame]) -> List
         except Exception:
             name = ""
         disp = f"{t} — {name}" if name else t
-        rows.append([disp, f"{close:.2f}", f"{p.entry_price:.2f}", f"{p.stop:.2f}", f"{p.trail:.2f}", p.shares, p.sector])
+        rows.append(
+            [
+                disp,
+                f"{close:.2f}",
+                f"{p.entry_price:.2f}",
+                f"{p.stop:.2f}",
+                f"{p.trail:.2f}",
+                p.shares,
+                p.sector,
+            ]
+        )
     return rows
