@@ -21,11 +21,12 @@ REGIME_MIN_TRUE = 2  # need >=2 of 3 for active
 # Sector strength
 SECTOR_RS_LOOKBACK = 20  # days
 SECTOR_TOP_PERCENTILE = 60  # buy only top 50% sectors
+WITHIN_SECTOR_RS_MIN = 50.0  # buy only stocks in top 50% of their sector
 
 # Fundamentals
 FUNDAMENTAL_CACHE_DAYS = 7  # days to cache fundies
-FUNDAMENTAL_MIN_FS = 50  # min Fundamental Score (0-100)
-FUNDAMENTAL_MIN_FS_SECTOR_TOP = 60.0  # sector percentile threshold (top 40% == pct>=60)
+FUNDAMENTAL_MIN_FS = 40  # min Fundamental Score (0-100)
+FUNDAMENTAL_MIN_FS_SECTOR_TOP = 50.0  # sector percentile threshold (top 50% == pct>=50)
 FUNDAMENTAL_NEAR_MISS_PCT = 10.0  # within 10% of threshold considered near miss
 
 # Technicals

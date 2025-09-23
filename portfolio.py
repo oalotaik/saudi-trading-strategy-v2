@@ -229,7 +229,7 @@ def select_candidates(
         sec = sectors.get(t, "Unknown")
         if sector_rank_pct.get(sec, 50.0) < config.SECTOR_TOP_PERCENTILE:
             continue
-        if rs_pct_within_sector.get(t, 50.0) < 70.0:
+        if rs_pct_within_sector.get(t, 50.0) < config.WITHIN_SECTOR_RS_MIN:
             continue
         rs = rs_pct_within_sector.get(t, 50.0)
         tech = tech_score(df, rs)

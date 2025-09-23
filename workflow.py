@@ -286,6 +286,124 @@ def daily_after_close(
             "DB55": bool(trigger_DB55(sub)),
         }
 
+    # === NEW: Trigger Summary + Near-misses (print-only) ===
+    n_d1 = sum(1 for v in triggers.values() if v.get("D1"))
+    n_d2 = sum(1 for v in triggers.values() if v.get("D2"))
+    n_db = sum(1 for v in triggers.values() if v.get("DB55"))
+    n_any = sum(1 for v in triggers.values() if any(v.values()))
+
+    from reporting import print_panel, print_table
+
+    print_panel(
+        "Trigger Summary", f"D1: {n_d1} | D2: {n_d2} | DB55: {n_db} | Any: {n_any}"
+    )
+
+    # If nothing fired, show who was closest (very light-weight heuristics)
+    if n_any == 0 and selection_pool:
+        near_rows = []
+        for t, sub in selection_pool.items():
+            if sub.empty:
+                continue
+            last = sub.iloc[-1]
+            sec = sectors.get(t, "Unknown")
+
+            # --- D1 near-miss: within 2% of High20 and other preconditions mostly OK
+            d1_near = False
+            d1_gap_pct = None
+            if "High20" in last and last["High20"] > 0:
+                d1_gap_pct = 100.0 * (last["High20"] - last["Close"]) / last["High20"]
+                d1_near = d1_gap_pct <= 2.0
+
+            # Helpful context gaps for D1 thresholds
+            d1_rsi_gap = (
+                (last["RSI14"] - config.D1_MIN_RSI) if "RSI14" in last else None
+            )
+            d1_adx_gap = (
+                (last["ADX14"] - config.D1_MIN_ADX) if "ADX14" in last else None
+            )
+
+            # --- D2 near-miss: within 2% of yesterday's High (breakout part)
+            d2_near = False
+            d2_gap_pct = None
+            if len(sub) >= 2:
+                prev_high = float(sub.iloc[-2]["High"])
+                if prev_high > 0:
+                    d2_gap_pct = 100.0 * (prev_high - float(last["Close"])) / prev_high
+                    d2_near = d2_gap_pct <= 2.0
+
+            # --- DB55 near-miss: within 2% of Donchian(55) high
+            db_near = False
+            db_gap_pct = None
+            win = getattr(config, "DONCHIAN_LOOKBACK", 55)
+            if len(sub) >= win:
+                donch_high = float(sub["High"].rolling(win).max().iloc[-1])
+                if donch_high > 0:
+                    db_gap_pct = (
+                        100.0 * (donch_high - float(last["Close"])) / donch_high
+                    )
+                    db_near = db_gap_pct <= 2.0
+
+            # Only list names that were "near" at least one trigger (and did not actually trigger)
+            if (d1_near or d2_near or db_near) and not any(
+                triggers.get(t, {}).values()
+            ):
+                which = ",".join(
+                    [
+                        w
+                        for w, flag in [
+                            ("D1_near", d1_near),
+                            ("D2_near", d2_near),
+                            ("DB55_near", db_near),
+                        ]
+                        if flag
+                    ]
+                )
+                # Choose a primary sorting key = smallest positive % gap among the 3
+                gaps = [
+                    g
+                    for g in [d1_gap_pct, d2_gap_pct, db_gap_pct]
+                    if g is not None and g >= 0
+                ]
+                best_gap = min(gaps) if gaps else float("inf")
+
+                near_rows.append(
+                    [
+                        fmt_ticker_and_name(t, names.get(t)),
+                        sec,
+                        which,
+                        f"{(d1_gap_pct if d1_gap_pct is not None else float('nan')):.2f}",
+                        f"{(d2_gap_pct if d2_gap_pct is not None else float('nan')):.2f}",
+                        f"{(db_gap_pct if db_gap_pct is not None else float('nan')):.2f}",
+                        f"{(d1_rsi_gap if d1_rsi_gap is not None else float('nan')):.2f}",
+                        f"{(d1_adx_gap if d1_adx_gap is not None else float('nan')):.2f}",
+                        f"{best_gap:.2f}",
+                    ]
+                )
+
+        if near_rows:
+            # Sort by the smallest percentage gap to a trigger (ascending)
+            near_rows.sort(key=lambda r: float(r[-1]))
+            print_table(
+                "Near-miss Triggers (no signals fired today)",
+                [
+                    "Ticker — Name",
+                    "Sector",
+                    "Near",
+                    "% to High20",
+                    "% to prevHigh",
+                    "% to Donch55",
+                    "RSI–min",
+                    "ADX–min",
+                    "Best % gap",
+                ],
+                near_rows[:15],
+            )
+        else:
+            print_panel(
+                "Near-miss Triggers", "No names were close to D1/D2/DB55 today."
+            )
+    # End of new trigger summary + near-miss section
+
     candidates = select_candidates(
         selection_pool, sectors, triggers, sec_pct, rs_pct_within, fs_map
     )
@@ -294,6 +412,96 @@ def daily_after_close(
     dt = min([df.index[-1] for df in ind.values()])
     equity, dd = mark_to_market(state, ind, dt=dt)
     trades_today = []
+
+    # === DEBUG: Why triggered names did not become candidates ===
+    triggered = [t for t, flags in triggers.items() if any(flags.values())]
+    if triggered:
+        rows = []
+        for t in triggered:
+            sec = sectors.get(t, "Unknown")
+            reasons = []
+            # 1) Sector RS gate
+            sec_pct_val = sec_pct.get(sec, 50.0)
+            if sec_pct_val < config.SECTOR_TOP_PERCENTILE:
+                reasons.append(
+                    f"SectorRS {sec_pct_val:.1f} < {config.SECTOR_TOP_PERCENTILE}"
+                )
+            # 2) Within-sector RS gate
+            within = rs_pct_within.get(t, float("nan"))
+            if not (within == within and within >= 70.0):
+                reasons.append(f"WithinSecRS {within:.1f} < 70.0")
+            # 3) If it passes the above, check action-list gates similar to build_action_list
+            if not reasons:
+                # sector cap vs current holdings
+                from collections import Counter
+
+                held = set(state.positions.keys())
+                by_sec = Counter(sectors.get(h, "Unknown") for h in held)
+                if by_sec[sec] >= config.MAX_PER_SECTOR:
+                    reasons.append(
+                        f"SectorCap reached ({by_sec[sec]}/{config.MAX_PER_SECTOR})"
+                    )
+                # correlation to held
+                if held:
+                    import pandas as pd
+
+                    dfc = pd.DataFrame()
+                    for ht in held:
+                        if ht in ind and not ind[ht].empty:
+                            dfc[ht] = (
+                                ind[ht]["Close"]
+                                .pct_change()
+                                .tail(config.CORRELATION_LOOKBACK)
+                                .reset_index(drop=True)
+                            )
+                    if t in ind and not ind[t].empty and not dfc.empty:
+                        dfc[t] = (
+                            ind[t]["Close"]
+                            .pct_change()
+                            .tail(config.CORRELATION_LOOKBACK)
+                            .reset_index(drop=True)
+                        )
+                        try:
+                            mc = float(dfc.corr().loc[t, list(held)].max())
+                        except Exception:
+                            mc = float("nan")
+                        if mc == mc and mc > config.MAX_CORRELATION:
+                            reasons.append(
+                                f"Corr {mc:.2f} > {config.MAX_CORRELATION:.2f}"
+                            )
+                # sizing zero?
+                if t in ind and not ind[t].empty and not reasons:
+                    last = ind[t].iloc[-1]
+                    entry = float(last["Close"])
+                    atr = float(last["ATR14"])
+                    swing_low = float(ind[t]["Low"].tail(10).min())
+                    stop = max(entry - 2 * atr, swing_low - 0.5 * atr)
+                    if stop >= entry:
+                        reasons.append("Stop>=Entry (invalid setup)")
+                    else:
+                        from risk import position_size, cap_weight
+
+                        sh = cap_weight(
+                            position_size(equity, entry, stop), entry, equity
+                        )
+                        if sh <= 0:
+                            reasons.append("Shares=0 (risk/weight cap)")
+            rows.append(
+                [
+                    fmt_ticker_and_name(t, names.get(t)),
+                    sec,
+                    " ".join([k for k, v in triggers[t].items() if v]) or "-",
+                    ", ".join(reasons) if reasons else "(Would pass all gates)",
+                ]
+            )
+        print_table(
+            "Triggered but excluded — reasons",
+            ["Ticker — Name", "Sector", "Trig", "Why Not Bought"],
+            rows,
+        )
+    else:
+        print_panel("Triggers vs. Entries", "No triggers today (already shown above).")
+    # End debug
 
     # Regime gating identical to backtest
     breadth = 100.0 * np.mean(
@@ -373,6 +581,8 @@ def daily_after_close(
             return float("nan")
 
     preview_rows = []
+    from risk import position_size, cap_weight
+
     for t, trig, sec in hypo_candidates:
         if capacity <= 0:
             break
