@@ -16,7 +16,6 @@ BREADTH_MIN_PCT_ABOVE_SMA50 = 45.0  # percent
 REGIME_SMA_LONG = 200
 REGIME_SMA_MED = 50
 REGIME_SLOPE_WINDOW = 20
-REGIME_MIN_TRUE = 2  # need >=2 of 3 for active
 
 # Sector strength
 SECTOR_RS_LOOKBACK = 20  # days
