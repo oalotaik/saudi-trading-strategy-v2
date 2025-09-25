@@ -20,7 +20,7 @@ REGIME_MIN_TRUE = 2  # need >=2 of 3 for active
 
 # Sector strength
 SECTOR_RS_LOOKBACK = 20  # days
-SECTOR_TOP_PERCENTILE = 60  # buy only top 50% sectors
+SECTOR_TOP_PERCENTILE = 60  # buy only top 60% sectors
 WITHIN_SECTOR_RS_MIN = 50.0  # buy only stocks in top 50% of their sector
 
 # Fundamentals
